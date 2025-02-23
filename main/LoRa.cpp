@@ -140,7 +140,7 @@ void LoRa::initialize( int power )
 	// setSignalBandwidth(125E3);
 	// setSyncWord(0x34);
 	// setCRC( false );
-	// setCRC( true );
+	setCRC( true );
 
     // put in standby mode
 	idle();

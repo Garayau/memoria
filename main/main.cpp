@@ -9,6 +9,7 @@
 #include "driver/gpio.h"
 #include "rom/gpio.h"
 #include "esp_timer.h"
+#include "esp_mac.h"
 
 #include "LoRa.h"
 
@@ -22,8 +23,19 @@
 #define SENDER_RECEIVER_PIN	22
 #define	FLASH_PIN			2
 
+#define UNIQUE_ID_MAX_LEN 20  // Define max length for ID string
+
+char unique_id[UNIQUE_ID_MAX_LEN];  // Global variable to store the unique ID
 int _counter = 0;
 
+
+void generate_unique_id() {
+    uint8_t mac[6];
+    esp_efuse_mac_get_default(mac);  // Get unique MAC address
+
+    snprintf(unique_id, sizeof(unique_id), "Client%02X%02X%02X", mac[3], mac[4], mac[5]);
+    ESP_LOGI("UID", "ESP32 Unique ID: %s", unique_id);
+}
 
 void writeMessage( LoRa* lora )
 {
@@ -31,7 +43,7 @@ void writeMessage( LoRa* lora )
 	lora->beginPacket(false);
 
 	//sprintf( buf, "123456789012345678901234567890123456789012345678901234567890: [%d]", _counter++);
-	sprintf( buf, "Count: [%d]", _counter++);
+	sprintf( buf, "%s: Count [%d]", unique_id, _counter++);
 
 	//lora->setTxPower(14,RF_PACONFIG_PASELECT_PABOOST);
 	lora->write( (uint8_t*) buf, (size_t) strlen(buf) );
@@ -76,10 +88,8 @@ void lora_task( void* param )
 	gpio_num_t fp = (gpio_num_t) FLASH_PIN;
 	gpio_pad_select_gpio( fp );
 	gpio_set_direction( fp , GPIO_MODE_OUTPUT);
-
-
-
-
+    
+    generate_unique_id();  // Generate and store unique ID
 
 	for ( ;; )
 	{
