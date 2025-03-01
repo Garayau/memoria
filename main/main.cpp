@@ -37,13 +37,13 @@ void generate_unique_id() {
     ESP_LOGI("UID", "ESP32 Unique ID: %s", unique_id);
 }
 
-void writeMessage( LoRa* lora )
+void writeMessage( LoRa* lora, uint64_t timestamp )
 {
 	char buf[100];
 	lora->beginPacket(false);
 
 	//sprintf( buf, "123456789012345678901234567890123456789012345678901234567890: [%d]", _counter++);
-	sprintf( buf, "%s: Count [%d]", unique_id, _counter++);
+	sprintf( buf, "%llu%s: Count [%d]", timestamp, unique_id, _counter++);
 
 	//lora->setTxPower(14,RF_PACONFIG_PASELECT_PABOOST);
 	lora->write( (uint8_t*) buf, (size_t) strlen(buf) );
@@ -116,17 +116,17 @@ void lora_task( void* param )
                 // Read message
                 char buf[200] = {0};
                 char msg[100] = {0};
+                int64_t timestamp = 0;
 
-                int packetSize = lora.handleDataReceived( msg );
+                int packetSize = lora.handleDataReceived( msg, &timestamp );
                 lora.setDataReceived( false );
 
-                // Print the message with escape sequences for special characters
-                sprintf(buf, "\n<%s>\n(%d) RSSI: %d\n", msg, packetSize, lora.getPacketRssi());
-
+                // Adds timestamp, message and RSSI to the buffer
+                sprintf(buf, "\n<%llu>\n<%s>\n(%d) RSSI: %d\n", timestamp, msg, packetSize, lora.getPacketRssi());
                 printf( buf );
 
                 // Send message
-                writeMessage( &lora );
+                writeMessage( &lora, timestamp);
                 printf("Sending\n");
 
                 // Flash the LED

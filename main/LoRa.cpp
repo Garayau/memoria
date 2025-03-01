@@ -417,7 +417,7 @@ int LoRa::getPacketRssi()
 }
 
 
-int LoRa::handleDataReceived( char *msg )
+int LoRa::handleDataReceived( char *msg, int64_t *timestamp )
 {
 	int irqFlags = readRegister(REG_IRQ_FLAGS);
 	writeRegister(REG_IRQ_FLAGS, irqFlags);
@@ -435,15 +435,16 @@ int LoRa::handleDataReceived( char *msg )
 
         // set FIFO address to current RX address
 		writeRegister(REG_FIFO_ADDR_PTR, readRegister(REG_FIFO_RX_CURRENT_ADDR));
-//		if (_onReceive) { _onReceive(packetLength); }
+        // if (_onReceive) { _onReceive(packetLength); }
 
-		// Skip padding bytes (e.g., 0xFF) before valid data
-        for (int i = 0; i < packetLength; i++) {
-            char byte = read();
-            
-            if (byte != 0xFF && byte != 0x00) {
-                *msg++ = byte;  // Only store valid bytes
-            }
+        // Read timestamp (64-bit) first
+        for (int i = 0; i < 8; i++) {
+            *timestamp = (*timestamp << 8) | read();  // Build the timestamp from 8 bytes
+        }
+
+        // Now read the message (after the timestamp)
+        for (int i = 8; i < packetLength; i++) {
+            *msg++ = read();  // Only store valid bytes
         }
         *msg = '\0';  // Null-terminate the string
 
