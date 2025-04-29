@@ -328,7 +328,6 @@ int LoRa::endPacket(bool async)
     while ((readRegister(REG_IRQ_FLAGS) & IRQ_TX_DONE_MASK) == 0);
     // clear IRQ's
     writeRegister(REG_IRQ_FLAGS, IRQ_TX_DONE_MASK);
-	//printf( "TX Done\n");
   }
 
   return 1;
@@ -338,14 +337,11 @@ int LoRa::endPacket(bool async)
 size_t LoRa::write(const uint8_t *buffer, size_t size)
 {
   int currentLength = readRegister(REG_PAYLOAD_LENGTH);
-  //printf( "Current: %d Size: %d\n" , currentLength, size );
 
   // check size
   if ((currentLength + size) > MAX_PKT_LENGTH) {
     size = MAX_PKT_LENGTH - currentLength;
   }
-
-  //printf( "New Size: %d\n" , size );
 
   // write data
   for (size_t i = 0; i < size; i++) {
@@ -360,7 +356,6 @@ size_t LoRa::write(const uint8_t *buffer, size_t size)
 
 int LoRa::available()
 {
-	//printf( "RX Nbr Bytes: [%d]\n", readRegister(REG_RX_NB_BYTES) );
 	return (readRegister(REG_RX_NB_BYTES) - _packetIndex);
 }
 
@@ -387,37 +382,18 @@ void LoRa::receive(int size)
 	writeRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_RX_CONTINUOUS);
 }
 
-int LoRa::getPacketRssi()
-{
-	int8_t snr=0;
-    int8_t SnrValue = readRegister( 0x19 );
+int LoRa::getPacketRssi() {
     int16_t rssi = readRegister(REG_PKT_RSSI_VALUE);
+    return rssi - (_frequency < 525E6 ? 164 : 157);
+}
 
-	if( SnrValue & 0x80 ) // The SNR sign bit is 1
-	{
-		// Invert and divide by 4
-		snr = ( ( ~SnrValue + 1 ) & 0xFF ) >> 2;
-		snr = -snr;
-	}
-	else
-	{
-		// Divide by 4
-		snr = ( SnrValue & 0xFF ) >> 2;
-	}
-    if(snr<0)
-    {
-    	rssi = rssi - (_frequency < 525E6 ? 164 : 157) + ( rssi >> 4 ) + snr;
-    }
-    else
-    {
-    	rssi = rssi - (_frequency < 525E6 ? 164 : 157) + ( rssi >> 4 );
-    }
-
-  return ( rssi );
+int LoRa::getPacketSnr() {
+    return (int8_t)readRegister(0x19) / 4;
 }
 
 
-int LoRa::handleDataReceived( char *msg, int64_t *timestamp )
+
+int LoRa::handleDataReceived( char *msg, int64_t *timestamp_rx )
 {
 	int irqFlags = readRegister(REG_IRQ_FLAGS);
 	writeRegister(REG_IRQ_FLAGS, irqFlags);
@@ -426,20 +402,15 @@ int LoRa::handleDataReceived( char *msg, int64_t *timestamp )
 	{
         // read packet length
 		int packetLength = _implicitHeaderMode ? readRegister(REG_PAYLOAD_LENGTH) : readRegister(REG_RX_NB_BYTES);
-		// printf( "In handleDataReceived: len: %d fifo_addr: %d rx_addr: %d\n",
-		// 		packetLength,
-		// 		readRegister(REG_FIFO_ADDR_PTR),
-		// 		readRegister(REG_FIFO_RX_CURRENT_ADDR) );
 
 		_packetIndex = 0;
 
         // set FIFO address to current RX address
 		writeRegister(REG_FIFO_ADDR_PTR, readRegister(REG_FIFO_RX_CURRENT_ADDR));
-        // if (_onReceive) { _onReceive(packetLength); }
 
         // Read timestamp (64-bit) first
         for (int i = 0; i < 8; i++) {
-            *timestamp = (*timestamp << 8) | read();  // Build the timestamp from 8 bytes
+            *timestamp_rx = (*timestamp_rx << 8) | read();  // Build the timestamp from 8 bytes
         }
 
         // Now read the message (after the timestamp)
@@ -515,7 +486,6 @@ void LoRa::delay( int msec )
 
 void LoRa::writeRegister( uint8_t reg, uint8_t data )
 {
-    //printf("Writing Register [%02x]=[%02x]\n", reg, data);
 	reg = reg | 0x80;
 
 	spi_transaction_t transaction;
@@ -552,7 +522,6 @@ uint8_t LoRa::readRegister( uint8_t reg )
 	    ESP_LOGE(TAG, "Error adding SPI device: %s", esp_err_to_name(err));
 
 	memcpy(&result, transaction.rx_data, 1);
-//    printf("Reading Register [%02x]=[%02x]\n", reg, result);
 
 	return result;
 }

@@ -42,10 +42,9 @@ void writeMessage( LoRa* lora, uint64_t timestamp )
 	char buf[100];
 	lora->beginPacket(false);
 
-	//sprintf( buf, "123456789012345678901234567890123456789012345678901234567890: [%d]", _counter++);
-	sprintf( buf, "%llu%s: Count [%d]", timestamp, unique_id, _counter++);
+	sprintf( buf, "%llu-%s: Count [%d]", timestamp, unique_id, _counter++);
+    printf("Sending: %s\n", buf);
 
-	//lora->setTxPower(14,RF_PACONFIG_PASELECT_PABOOST);
 	lora->write( (uint8_t*) buf, (size_t) strlen(buf) );
 	lora->endPacket(false);
 
@@ -83,7 +82,6 @@ void lora_task( void* param )
 
 	LoRa lora( PIN_NUM_MOSI, PIN_NUM_MISO, PIN_NUM_CLK, PIN_NUM_CS, RESET_PIN, PIN_NUM_DIO, 10 );
 	lora.setTxPower( 17, PA_BOOST );
-	// lora.setTxPower( 5, PA_OUTPUT_RFO_PIN );
 
 	gpio_num_t fp = (gpio_num_t) FLASH_PIN;
 	gpio_pad_select_gpio( fp );
@@ -94,53 +92,59 @@ void lora_task( void* param )
 	for ( ;; )
 	{
         uint64_t startTime = esp_timer_get_time(); // Time in µs
-
+        
         // Reception mode
         lora.receive(0);
-        printf("Esperando mensajes...\n");
-
+        printf("Waiting for messages...\n");
+        
         // Wait message for 2 seconds
         while ((esp_timer_get_time() - startTime) < 2000000) // 1s = 1,000,000 µs
         {
-            if ( lora.getDataReceived() )
-            {   
-                // Flash the LED
-                for ( int i = 0 ; i < 3 ; i++)
-                {
-                    gpio_set_level( fp, 1);
-                    delay(50);
-                    gpio_set_level( fp, 0);
-                    delay(50);
-                }
-
+                if (lora.getDataReceived())
+            {
                 // Read message
-                char buf[200] = {0};
                 char msg[100] = {0};
-                int64_t timestamp = 0;
+                int64_t timestamp_rx = 0; // From Raspberry
+                int64_t ts_ns_lora_rx = esp_timer_get_time(); // Local timestamp when RX_DONE happens
 
-                int packetSize = lora.handleDataReceived( msg, &timestamp );
-                lora.setDataReceived( false );
+                int packetSize = lora.handleDataReceived(msg, &timestamp_rx);
+                lora.setDataReceived(false);
 
-                // Adds timestamp, message and RSSI to the buffer
-                sprintf(buf, "\n<%llu>\n<%s>\n(%d) RSSI: %d\n", timestamp, msg, packetSize, lora.getPacketRssi());
-                printf( buf );
-
-                // Send message
-                writeMessage( &lora, timestamp);
-                printf("Sending\n");
-
-                // Flash the LED
-                for ( int i = 0 ; i < 3 ; i++)
+                if (packetSize < 44) // Sanity check
                 {
-                    gpio_set_level( fp, 1);
+                    printf("Small packet (%d bytes), skipping\n", packetSize);
+                    continue;
+                }
+
+                printf("Received message: %s\n", msg);
+                printf("Received timestamp (from RPi): %llu\n", timestamp_rx);
+                printf("Received RSSI: %d\n", lora.getPacketRssi());
+                printf("Received SNR: %d\n", lora.getPacketSnr());
+
+                // Now, adjust the timestamp
+                int64_t ts_ns_now = esp_timer_get_time();
+                int64_t processing_delay = ts_ns_now - ts_ns_lora_rx;
+                int64_t corrected_timestamp = timestamp_rx + processing_delay;
+
+                // Send reply
+                writeMessage(&lora, corrected_timestamp);
+                printf("Reply sent!\n");
+                printf("-------------------------\n");
+
+                // Flash LED after all important actions
+                for (int i = 0; i < 3; i++)
+                {
+                    gpio_set_level(fp, 1);
                     delay(50);
-                    gpio_set_level( fp, 0);
+                    gpio_set_level(fp, 0);
                     delay(50);
                 }
-                }
+
+                break; // After one message, break and restart
+            }
         }
 
-		delay(10);
+        delay(10);
 
 	}
 
@@ -149,10 +153,6 @@ void lora_task( void* param )
 
 void app_main()
 {
-	// Had to set the task size to 10k otherwise I would get various instabilities
-	// Around 2k or less I would get the stack overflow warning but at 2048 it would
-	// just crash in various random ways
-
 	xTaskCreate(lora_task, "lora_task", 10000, NULL, 1, NULL);
 }
 
