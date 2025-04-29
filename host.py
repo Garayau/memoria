@@ -16,7 +16,7 @@ SPI_DEVICE = 1
 CS_PIN = 7  # Chip select (GPIO07, CE1)
 RESET_PIN = 25  # Reset pin
 
-# Register
+# Registers
 REG_FIFO = 0x00
 REG_OP_MODE = 0x01
 REG_FRF_MSB = 0x06
@@ -56,132 +56,143 @@ GPIO.setmode(GPIO.BCM)
 GPIO.setup(CS_PIN, GPIO.OUT)
 GPIO.setup(RESET_PIN, GPIO.OUT)
 
-# Reset LoRa module
 def reset_lora():
     GPIO.output(RESET_PIN, 0)
     time.sleep(0.01)
     GPIO.output(RESET_PIN, 1)
     time.sleep(0.01)
 
-# Function to send SPI data
 def spi_write(register, value):
-    GPIO.output(CS_PIN, 0)  # Select LoRa module
-    spi.xfer2([register | 0x80, value])  # Write operation (bit 7 high)
-    GPIO.output(CS_PIN, 1)  # Deselect LoRa module
+    GPIO.output(CS_PIN, 0)
+    spi.xfer2([register | 0x80, value])
+    GPIO.output(CS_PIN, 1)
 
-# Function to read SPI data
 def spi_read(register):
     GPIO.output(CS_PIN, 0)
-    value = spi.xfer2([register & 0x7F, 0x00])  # Read operation (bit 7 low)
+    value = spi.xfer2([register & 0x7F, 0x00])
     GPIO.output(CS_PIN, 1)
-    return value[1]  # Return data byte
+    return value[1]
 
-# Initialize LoRa module
 def init_lora():
     reset_lora()
-    spi_write(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_SLEEP)  # Set LoRa mode, sleep mode
-    # Set frequency (example: 915 MHz)
-    freq = int((915000000 / 32e6) * (2**19))
-    spi_write(REG_FRF_MSB, (freq >> 16) & 0xFF)  # RegFrfMsb
-    spi_write(REG_FRF_MID, (freq >> 8) & 0xFF)   # RegFrfMid
-    spi_write(REG_FRF_LSB, freq & 0xFF)          # RegFrfLsb
+    spi_write(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_SLEEP)
+
+    freq = int((RADIO_FREQ_MHZ * 1_000_000) / (32_000_000) * (2**19))
+    spi_write(REG_FRF_MSB, (freq >> 16) & 0xFF)
+    spi_write(REG_FRF_MID, (freq >> 8) & 0xFF)
+    spi_write(REG_FRF_LSB, freq & 0xFF)
 
     # Set output power to max (17 dBm)
-    spi_write(REG_PA_CONFIG, 0x8F)  # RegPaConfig
-
+    spi_write(REG_PA_CONFIG, 0x8F)
     # Set spreading factor (SF7 for fast transmission)
-    spi_write(REG_MODEM_CONFIG_1, 0x72)  # RegModemConfig1 (BW=125kHz, Coding Rate=4/5)
-    spi_write(REG_MODEM_CONFIG_2, 0x74)  # RegModemConfig2 (SF=7, CRC on)
+    spi_write(REG_MODEM_CONFIG_1, 0x72)
+    spi_write(REG_MODEM_CONFIG_2, 0x74)
+
+    spi_write(REG_MODEM_CONFIG_3, 0x04)
 
     # Set preamble length
-    spi_write(REG_PREAMBLE_MSB, 0x00)  # RegPreambleMsb
-    spi_write(REG_PREAMBLE_LSB, 0x08)  # RegPreambleLsb (8 symbols)
-
+    spi_write(REG_PREAMBLE_MSB, 0x00)
+    spi_write(REG_PREAMBLE_LSB, 0x08)
+    
     # Enable FIFO TX base address
-    spi_write(REG_FIFO_TX_BASE_ADDR, 0x00)  # Set FIFO TX base address
-    spi_write(REG_FIFO_RX_BASE_ADDR, 0x00)  # Set FIFO RX base address
+    spi_write(REG_FIFO_TX_BASE_ADDR, 0x00)
+    spi_write(REG_FIFO_RX_BASE_ADDR, 0x00)
 
-    spi_write(REG_MODEM_CONFIG_3, 0x04)  # Modem Config 3 (Low Data Rate Optimize OFF)
-    # spi_write(REG_PA_DAC, 0x00)  # No Auto-AGC
     print("LoRa module initialized.")
 
-# LoRa Send Packet
 def send_lora_message():
-    timestamp = time.time_ns()  # Nanosecond precision
-    time1 = timestamp # Start of packet transmission
+    timestamp = int(time.time() * 1_000_000)
 
     message = f"{unique_id}: Hello from Raspberry Pi!"
     packet = struct.pack(">Q", timestamp) + message.encode('utf-8')
+
     print(f"\nSending message: {message}")
-    
-    # Send LoRa packet (Write to FIFO)
-    spi_write(REG_FIFO_ADDR_PTR, 0x00)  # Set FIFO pointer to base
+    print(f"Timestamp: {timestamp}")
+    print(f"Packet length: {len(packet)} bytes")
+
+    spi_write(REG_FIFO_ADDR_PTR, 0x00) # Set FIFO pointer to base
     for byte in packet:
-        spi_write(REG_FIFO, byte)  # Write data to FIFO
-    
-    spi_write(REG_PAYLOAD_LENGTH, len(packet))  # Set payload length
-    spi_write(REG_OP_MODE, MODE_TX)  # Start transmission
+        spi_write(REG_FIFO, byte) # Write data to FIFO
 
-    # Timeout Mechanism
+    spi_write(REG_PAYLOAD_LENGTH, len(packet)) # Set payload length
+    spi_write(REG_OP_MODE, MODE_TX) # Start transmission
+
     start_time = time.time()
-    while (spi_read(REG_IRQ_FLAGS) & IRQ_TX_DONE_MASK) == 0:  # Wait for packet sent
-        if time.time() - start_time > 2:  # Timeout after 2 seconds
+    while (spi_read(REG_IRQ_FLAGS) & IRQ_TX_DONE_MASK) == 0:
+        if time.time() - start_time > 2:
             print("ERROR: Send timeout!")
-            return
-        time.sleep(0.01)
+            return None
+        time.sleep(0.005)
 
-    spi_write(REG_IRQ_FLAGS, IRQ_TX_DONE_MASK)  # Clear TX Done flag
+    spi_write(REG_IRQ_FLAGS, IRQ_TX_DONE_MASK) # Clear TX done flag
 
-    time2 = time.time_ns() # End of packet transmission
-    send_time = time2 - time1 # Time wasted sending packet
-    return send_time
+    return timestamp
 
-# LoRa Receive Packet
-def receive_lora_message(send_time):
-    spi_write(REG_OP_MODE, MODE_RX_CONTINUOUS)  # Set to continuous receive mode
+def receive_lora_message(send_time_diff):
+    spi_write(REG_OP_MODE, MODE_RX_CONTINUOUS) # Set to RX mode
 
     start_time = time.time()
-    while (spi_read(REG_IRQ_FLAGS) & IRQ_RX_DONE_MASK) == 0:  # Wait for valid packet
-        if time.time() - start_time > 5:  # Timeout after 5 seconds
+    while (spi_read(REG_IRQ_FLAGS) & IRQ_RX_DONE_MASK) == 0:
+        if time.time() - start_time > 2:
             print("ERROR: Receive timeout!")
             return
-        time.sleep(0.01)
+        time.sleep(0.005)
 
-    time1 = time.time_ns() # Start of packet reception
-    spi_write(REG_IRQ_FLAGS, IRQ_RX_DONE_MASK)  # Clear interrupt flag
-    packet_length = spi_read(REG_RX_NB_BYTES)  # Get received packet length
+    receive_timestamp = time.time() * 1_000_000
+    spi_write(REG_IRQ_FLAGS, IRQ_RX_DONE_MASK) # Clear RX done flag
+
+    packet_length = spi_read(REG_RX_NB_BYTES)
 
     packet = []
-    spi_write(REG_FIFO_ADDR_PTR, 0x00)  # Set FIFO read pointer
+    spi_write(REG_FIFO_ADDR_PTR, 0x00) # Set FIFO pointer to base
     for _ in range(packet_length):
-        packet.append(spi_read(REG_FIFO))  # Read bytes
-    time2 = time.time_ns() # End of packet reception
+        packet.append(spi_read(REG_FIFO))
 
-    receive_time = time2 - time1 # Time wasted processing packet
-    timestamp = time2 # Get current timestamp
+    packet_bytes = bytes(packet)
+    print(f"Received packet: {packet_bytes}")
+    print(f"Received length: {len(packet_bytes)}")
 
-    received_packet = bytes(packet)
-    received_timestamp = int(received_packet[:19]) # Extract timestamp
+    try:
+        packet_split = packet_bytes.split(b"-")
+        received_timestamp = int(packet_split[0].decode('utf-8'))
+        message = packet_split[1].decode('utf-8')
+    except (struct.error, UnicodeDecodeError):
+        print("ERROR: Failed to decode packet.")
+        return
 
-    # print(f"Received a packet!(bytes): {received_packet}")
-    print(f"Received a packet!: {received_packet[19:].decode('utf-8')}")
+    print(f"\nReceived message: {message}")
+    print(f"Received timestamp (from sender): {received_timestamp}")
+    print(f"Reception timestamp: {receive_timestamp}")
 
+    print("\nCalculating Time of Flight (ToF)...")
+    hardware_delay = 98522.0 # µs
+    rtt_ns = abs(((receive_timestamp - received_timestamp) - send_time_diff) - hardware_delay)
+    tof_s = rtt_ns / (2 * 1_000_000) # µs -> s, divide by 2 for one-way
+    distance_m = tof_s * 299_792_458 # / 1_000 # meters
 
-    # ToF Calculation
-    rtt_ns = timestamp - received_timestamp - send_time - receive_time
-    tof_s = rtt_ns / (2 * 1e9)  # Convert ns to seconds, divide by 2 for one-way
-    distance_m = tof_s * 299792458  # Speed of light
+    print(f"Round-trip time: {rtt_ns} µs")
+    print(f"Time of Flight (ToF): {tof_s} seconds")
+    print(f"Estimated distance: {distance_m:.3f} meters\n")
 
-    print(f"Round-trip time: {rtt_ns} ns")
-    print(f"Estimated distance: {distance_m:.3f} meters")
-
-
-if __name__ == "__main__":
-    # Initialize LoRa Module
+def main():
     init_lora()
 
-    # Main Loop
     while True:
-        send_time = send_lora_message()
-        receive_lora_message(send_time)
-        time.sleep(1)  # Prevent flooding LoRa module
+        t1 = time.time() * 1_000_000
+        send_lora_message()
+        t2 = time.time() * 1_000_000
+        send_time_diff = t2 - t1
+
+        if send_time_diff:
+            receive_lora_message(send_time_diff)
+        print("-----------------------")
+        time.sleep(1)
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("Stopping...")
+    finally:
+        GPIO.cleanup()
+        spi.close()
