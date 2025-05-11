@@ -20,7 +20,6 @@
 #define PIN_NUM_DIO		26
 #define RESET_PIN  		15
 
-#define SENDER_RECEIVER_PIN	22
 #define	FLASH_PIN			2
 
 #define UNIQUE_ID_MAX_LEN 20  // Define max length for ID string

@@ -128,6 +128,30 @@ def send_lora_message():
 
     return timestamp
 
+def calculate(distances_array):
+    """
+    Calculate average and standard deviation.
+    """
+    average_distance = sum(distances_array) / len(distances_array)
+    print(f"Average distance: {average_distance:.3f} meters")
+    std_dev = (sum((x - average_distance) ** 2 for x in distances_array) / len(distances_array)) ** 0.5
+    print(f"Standard deviation: {std_dev:.3f} meters")
+    return (average_distance, std_dev)
+
+def calculate_distance(receive_timestamp, received_timestamp, send_time_diff):
+    """
+    Calculate the distance based on the time of flight
+    and the speed of light (3e8 m/s)
+    """
+    HARDWARE_DELAY = 98522.0 # µs
+    rtt_ns = abs(((receive_timestamp - received_timestamp) - send_time_diff) - HARDWARE_DELAY)
+    tof_s = rtt_ns / (2 * 1_000_000) # µs -> s, divide by 2 for one-way
+    distance_m = tof_s * 299_792_458 / 1_000 # m -> km
+    print(f"Time of flight: {tof_s:.6f} seconds")
+    print(f"Distance: {distance_m:.3f} km")
+
+    return distance_m
+
 def receive_lora_message(send_time_diff):
     spi_write(REG_OP_MODE, MODE_RX_CONTINUOUS) # Set to RX mode
 
@@ -159,32 +183,54 @@ def receive_lora_message(send_time_diff):
     except (struct.error, UnicodeDecodeError):
         print("ERROR: Failed to decode packet.")
         return
+    except ValueError:
+        return
 
     print(f"\nReceived message: {message}")
     print(f"Received timestamp (from sender): {received_timestamp}")
     print(f"Reception timestamp: {receive_timestamp}")
 
     print("\nCalculating Time of Flight (ToF)...")
-    hardware_delay = 98522.0 # µs
-    rtt_ns = abs(((receive_timestamp - received_timestamp) - send_time_diff) - hardware_delay)
-    tof_s = rtt_ns / (2 * 1_000_000) # µs -> s, divide by 2 for one-way
-    distance_m = tof_s * 299_792_458 # / 1_000 # meters
-
-    print(f"Round-trip time: {rtt_ns} µs")
-    print(f"Time of Flight (ToF): {tof_s} seconds")
-    print(f"Estimated distance: {distance_m:.3f} meters\n")
+    distance_m = calculate_distance(receive_timestamp, received_timestamp, send_time_diff)
+    return distance_m
 
 def main():
     init_lora()
-
+    DISTANCES_BUFFER_SIZE = 20 # Number of distances to average per measurement
+    CALCULATIONS_BUFFER_SIZE = 10 # Number of measurements to average
+    distances_buffer = [] # Buffer for distances
+    measurements_buffer = [] # Buffer for average and standard deviations
     while True:
         t1 = time.time() * 1_000_000
         send_lora_message()
         t2 = time.time() * 1_000_000
         send_time_diff = t2 - t1
 
-        if send_time_diff:
-            receive_lora_message(send_time_diff)
+        # Receive the message and calculate distance
+        distance_m = receive_lora_message(send_time_diff)
+        if distance_m:
+            # Append distance to the buffer
+            distances_buffer.append(distance_m)
+            # Calculate average distance and std deviation and append to buffer
+            if len(distances_buffer) == DISTANCES_BUFFER_SIZE:
+                print("\n#########################\n")
+                print("Calculating average and standard deviation...")
+                measurements_buffer.append(calculate(distances_buffer))
+                # Reset the distances buffer
+                distances_buffer = []
+                print("\n#########################\n")
+
+
+        # Retrieve the best distance when buffer is full
+        if len(measurements_buffer) == CALCULATIONS_BUFFER_SIZE:
+            print("\nRetrieving best distance...")
+            # Sort list of tuples by standard deviation and get the lowest
+            measurements_buffer.sort(key=lambda x: x[1])
+            print(f"Measurements buffer: {measurements_buffer}")
+            print(f"Distance: {measurements_buffer[0][0]:.3f} meters")
+
+            exit(1)
+
         print("-----------------------")
         time.sleep(1)
 
