@@ -101,7 +101,7 @@ def init_lora():
     print("LoRa module initialized.")
 
 def send_lora_message():
-    timestamp = int(time.time() * 1_000_000)
+    timestamp = int(time.time_ns())
 
     message = f"{unique_id}: Hello from Raspberry Pi!"
     packet = struct.pack(">Q", timestamp) + message.encode('utf-8')
@@ -130,7 +130,7 @@ def send_lora_message():
 
 def calculate(distances_array):
     """
-    Calculate average and standard deviation.
+    Calculate average and standard deviation. Units are in meters.
     """
     average_distance = sum(distances_array) / len(distances_array)
     print(f"Average distance: {average_distance:.3f} meters")
@@ -143,12 +143,12 @@ def calculate_distance(receive_timestamp, received_timestamp, send_time_diff):
     Calculate the distance based on the time of flight
     and the speed of light (3e8 m/s)
     """
-    HARDWARE_DELAY = 98522.0 # µs
+    HARDWARE_DELAY = 0#98522.0 # 
     rtt_ns = abs(((receive_timestamp - received_timestamp) - send_time_diff) - HARDWARE_DELAY)
-    tof_s = rtt_ns / (2 * 1_000_000) # µs -> s, divide by 2 for one-way
-    distance_m = tof_s * 299_792_458 / 1_000 # m -> km
+    tof_s = rtt_ns / (2 * 1_000_000_000) # ns -> s, divide by 2 for one-way
+    distance_m = tof_s * 299_792_458 #/ 1_000 # m -> km
     print(f"Time of flight: {tof_s:.6f} seconds")
-    print(f"Distance: {distance_m:.3f} km")
+    print(f"Distance: {distance_m:.3f} meters")
 
     return distance_m
 
@@ -162,7 +162,7 @@ def receive_lora_message(send_time_diff):
             return
         time.sleep(0.005)
 
-    receive_timestamp = time.time() * 1_000_000
+    receive_timestamp = time.time_ns()
     spi_write(REG_IRQ_FLAGS, IRQ_RX_DONE_MASK) # Clear RX done flag
 
     packet_length = spi_read(REG_RX_NB_BYTES)
@@ -196,14 +196,14 @@ def receive_lora_message(send_time_diff):
 
 def main():
     init_lora()
-    DISTANCES_BUFFER_SIZE = 20 # Number of distances to average per measurement
-    CALCULATIONS_BUFFER_SIZE = 10 # Number of measurements to average
+    DISTANCES_BUFFER_SIZE = 10 # Number of distances to average per measurement
+    CALCULATIONS_BUFFER_SIZE = 5 # Number of measurements to average
     distances_buffer = [] # Buffer for distances
     measurements_buffer = [] # Buffer for average and standard deviations
     while True:
-        t1 = time.time() * 1_000_000
+        t1 = time.time_ns()
         send_lora_message()
-        t2 = time.time() * 1_000_000
+        t2 = time.time_ns()
         send_time_diff = t2 - t1
 
         # Receive the message and calculate distance
@@ -211,6 +211,7 @@ def main():
         if distance_m:
             # Append distance to the buffer
             distances_buffer.append(distance_m)
+
             # Calculate average distance and std deviation and append to buffer
             if len(distances_buffer) == DISTANCES_BUFFER_SIZE:
                 print("\n#########################\n")
@@ -219,7 +220,6 @@ def main():
                 # Reset the distances buffer
                 distances_buffer = []
                 print("\n#########################\n")
-
 
         # Retrieve the best distance when buffer is full
         if len(measurements_buffer) == CALCULATIONS_BUFFER_SIZE:

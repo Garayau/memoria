@@ -122,7 +122,7 @@ void lora_task( void* param )
 
                 // Now, adjust the timestamp
                 int64_t ts_ns_now = esp_timer_get_time();
-                int64_t processing_delay = ts_ns_now - ts_ns_lora_rx;
+                int64_t processing_delay = (ts_ns_now - ts_ns_lora_rx) * 1000; // Convert to ns
                 int64_t corrected_timestamp = timestamp_rx + processing_delay;
 
                 // Send reply
