@@ -49,7 +49,7 @@ void LoRa::initializeSPI( int mosi, int miso, int clk, int cs )
 
    	devcfg.address_bits = 8;
     devcfg.mode=0;
-	devcfg.clock_speed_hz=10 * 1000 * 1000;
+	devcfg.clock_speed_hz=200000;
 	devcfg.spics_io_num=cs;
 	devcfg.flags = SPI_DEVICE_HALFDUPLEX;
 	devcfg.queue_size = 1;
@@ -136,9 +136,10 @@ void LoRa::initialize( int power )
     // setTxPower(power, RF_PACONFIG_PASELECT_RFO);
 
     // other settings
-    setSpreadingFactor(7);
-	setSignalBandwidth(125E3);
-	// setSyncWord(0x12);
+    // setSpreadingFactor(12);
+	// setSignalBandwidth(125E3);
+	// setSyncWord(0x34);
+	// setCRC( false );
 	setCRC( true );
 
     // put in standby mode
@@ -230,6 +231,7 @@ void LoRa::setOCP(uint8_t mA)
 	writeRegister(REG_LR_OCP, 0x20 | (0x1F & ocpTrim));
 }
 
+
 void LoRa::setTxPower(int8_t level, int8_t outputPin)
 {
 
@@ -284,6 +286,7 @@ void LoRa::setTxPower(int8_t level, int8_t outputPin)
 	}
 }
 
+
 void LoRa::explicitHeaderMode()
 {
   _implicitHeaderMode = 0;
@@ -329,6 +332,7 @@ int LoRa::endPacket(bool async)
 
   return 1;
 }
+
 
 size_t LoRa::write(const uint8_t *buffer, size_t size)
 {
@@ -387,55 +391,39 @@ int LoRa::getPacketSnr() {
     return (int8_t)readRegister(0x19) / 4;
 }
 
+
+
 int LoRa::handleDataReceived( char *msg, int64_t *timestamp_rx )
 {
-    int irqFlags = readRegister(REG_IRQ_FLAGS);
-    writeRegister(REG_IRQ_FLAGS, irqFlags);
+	int irqFlags = readRegister(REG_IRQ_FLAGS);
+	writeRegister(REG_IRQ_FLAGS, irqFlags);
 
-    if ((irqFlags & IRQ_PAYLOAD_CRC_ERROR_MASK) == 0)
-    {
-        int packetLength = _implicitHeaderMode ? readRegister(REG_PAYLOAD_LENGTH) : readRegister(REG_RX_NB_BYTES);
+	if ((irqFlags & IRQ_PAYLOAD_CRC_ERROR_MASK) == 0)
+	{
+        // read packet length
+		int packetLength = _implicitHeaderMode ? readRegister(REG_PAYLOAD_LENGTH) : readRegister(REG_RX_NB_BYTES);
 
-        _packetIndex = 0; // Reset packet index
-        writeRegister(REG_FIFO_ADDR_PTR, readRegister(REG_FIFO_RX_CURRENT_ADDR));
+		_packetIndex = 0;
 
-        // Check if packet is too small to contain a timestamp
-        if (packetLength < (int)sizeof(uint64_t)) {
-            ESP_LOGW("LoRa", "Paquete muy pequeño (%d bytes) para contener timestamp.", packetLength);
-            for (int i = 0; i < packetLength; i++) { read(); } // Descartar bytes restantes
-            *msg = '\0';
-            *timestamp_rx = 0;
-            writeRegister(REG_FIFO_ADDR_PTR, 0);
-            return 0;
+        // set FIFO address to current RX address
+		writeRegister(REG_FIFO_ADDR_PTR, readRegister(REG_FIFO_RX_CURRENT_ADDR));
+
+        // Read timestamp (64-bit) first
+        for (int i = 0; i < 8; i++) {
+            *timestamp_rx = (*timestamp_rx << 8) | read();  // Build the timestamp from 8 bytes
         }
 
-        uint8_t timestamp_bytes[sizeof(uint64_t)];
-        for (int i = 0; i < sizeof(uint64_t); i++) {
-            timestamp_bytes[i] = read();
+        // Now read the message (after the timestamp)
+        for (int i = 8; i < packetLength; i++) {
+            *msg++ = read();  // Only store valid bytes
         }
-        memcpy(timestamp_rx, timestamp_bytes, sizeof(uint64_t)); // Copiar bytes al timestamp
-        // printf("Timestamp Bytes recibidos: %02x %02x %02x %02x %02x %02x %02x %02x\n",
-        //        timestamp_bytes[0], timestamp_bytes[1], timestamp_bytes[2], timestamp_bytes[3],
-        //        timestamp_bytes[4], timestamp_bytes[5], timestamp_bytes[6], timestamp_bytes[7]);
-        int message_start_index = sizeof(uint64_t);
-        int bytes_to_read_for_msg = packetLength - message_start_index;
+        *msg = '\0';  // Null-terminate the string
 
-        if (bytes_to_read_for_msg >= 0 && bytes_to_read_for_msg < 100) { // Asegurar no desbordar el buffer 'msg'
-            for (int i = 0; i < bytes_to_read_for_msg; i++) {
-                *msg++ = read();
-            }
-            *msg = '\0'; // Null-terminate the string
-        } else {
-            ESP_LOGW("LoRa", "Problema con la longitud del contenido del mensaje: %d bytes. Paquete: %d, TS: %d", bytes_to_read_for_msg, packetLength, (int)sizeof(uint64_t));
-            for (int i = 0; i < bytes_to_read_for_msg; i++) { read(); } // Descartar bytes restantes
-            *msg = '\0';
-            return 0;
-        }
-        
-        writeRegister(REG_FIFO_ADDR_PTR, 0);
-        return packetLength;
-    }
-    return 0; // No se recibió un paquete válido
+		writeRegister(REG_FIFO_ADDR_PTR, 0);
+		return packetLength;
+	}
+
+	return 0;
 }
 
 int LoRa::parsePacket(int size)
@@ -488,10 +476,13 @@ int LoRa::parsePacket(int size)
   	return packetLength;
 }
 
+
+
 void LoRa::delay( int msec )
 {
     vTaskDelay( msec / portTICK_PERIOD_MS);
 }
+
 
 void LoRa::writeRegister( uint8_t reg, uint8_t data )
 {

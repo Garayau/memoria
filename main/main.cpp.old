@@ -1,0 +1,139 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "esp_system.h"
+#include <esp_log.h>
+#include "driver/spi_master.h"
+#include "driver/gpio.h"
+#include "rom/gpio.h"
+#include "esp_timer.h"
+#include "esp_mac.h"
+
+#include "LoRa.h"
+
+#define PIN_NUM_CLK  	18
+#define PIN_NUM_MISO 	19
+#define PIN_NUM_MOSI 	23
+#define PIN_NUM_CS   	4
+#define PIN_NUM_DIO		26
+#define RESET_PIN  		15
+
+#define	FLASH_PIN			2
+
+#define UNIQUE_ID_MAX_LEN 20  // Define max length for ID string
+
+char unique_id[UNIQUE_ID_MAX_LEN];  // Global variable to store the unique ID
+int _counter = 0;
+
+
+// void generate_unique_id() {
+//     uint8_t mac[6];
+//     esp_efuse_mac_get_default(mac);  // Get unique MAC address
+
+//     snprintf(unique_id, sizeof(unique_id), "Client%02X%02X%02X", mac[3], mac[4], mac[5]);
+//     ESP_LOGI("UID", "ESP32 Unique ID: %s", unique_id);
+// }
+
+void writeMessage( LoRa* lora, uint64_t timestamp )
+{
+	char buf[100];
+	lora->beginPacket(false);
+
+	sprintf( buf, "%llu-%s: Count [%d]", timestamp, unique_id, _counter++);
+    // printf("Sending: %s\n", buf);
+
+	lora->write( (uint8_t*) buf, (size_t) strlen(buf) );
+	lora->endPacket(false);
+
+	char msg[200];
+	sprintf( msg, "Sender\n%s", buf );
+}
+
+void delay( int msec )
+{
+    vTaskDelay( msec / portTICK_PERIOD_MS);
+}
+
+extern "C" void app_main();
+extern "C" void lora_task( void *);
+
+//void app_main()
+void lora_task( void* param )
+{
+
+	LoRa lora( PIN_NUM_MOSI, PIN_NUM_MISO, PIN_NUM_CLK, PIN_NUM_CS, RESET_PIN, PIN_NUM_DIO, 10 );
+	lora.setTxPower( 17, PA_BOOST );
+
+	gpio_num_t fp = (gpio_num_t) FLASH_PIN;
+	gpio_pad_select_gpio( fp );
+	gpio_set_direction( fp , GPIO_MODE_OUTPUT);
+    
+    // generate_unique_id();  // Generate and store unique ID
+
+	for ( ;; )
+	{
+        uint64_t startTime = esp_timer_get_time(); // Time in µs
+        
+        // Reception mode
+        lora.receive(0);
+        printf("Waiting for messages...\n");
+        
+        // Wait message for 2 seconds
+        while ((esp_timer_get_time() - startTime) < 2000000) // 1s = 1,000,000 µs
+        {
+                if (lora.getDataReceived())
+            {
+                int64_t ts_ns_lora_rx = esp_timer_get_time(); // Local timestamp when RX_DONE happens
+                // Read message
+                char msg[100] = {0};
+                int64_t timestamp_rx = 0; // From Raspberry
+
+                int packetSize = lora.handleDataReceived(msg, &timestamp_rx);
+
+                // Set flag to false for next message
+                lora.setDataReceived(false);
+
+                if (packetSize < 44) // Sanity check
+                {
+                    // printf("Small packet (%d bytes), skipping\n", packetSize);
+                    continue;
+                }
+
+                printf("Received message: %s\n", msg);
+                printf("Received timestamp (from RPi): %llu\n", timestamp_rx);
+                printf("Received RSSI: %d\n", lora.getPacketRssi());
+                // printf("Received SNR: %d\n", lora.getPacketSnr());
+                
+                // Now, adjust the timestamp
+                int64_t ts_ns_now = esp_timer_get_time();
+                int64_t processing_delay = (ts_ns_now - ts_ns_lora_rx) * 1000; // Convert to ns
+                int64_t corrected_timestamp = timestamp_rx + processing_delay;
+
+                // Send reply
+                int64_t ts_start = esp_timer_get_time(); // measure time it takes to send reply
+                writeMessage(&lora, corrected_timestamp);
+                int64_t ts_end = esp_timer_get_time();
+                int64_t time_to_send = (ts_end - ts_start) * 1000; // Convert to ns
+                printf("Time to send reply: %lld ns\n", time_to_send);
+                // printf("Time spent between receiving and before sending message (added to sent timestamp): %lld ns\n", processing_delay);
+                // printf("Reply sent!\n");
+                // printf("-------------------------\n");
+
+                break; // After one message, break and restart
+            }
+        }
+
+        delay(10);
+
+	}
+
+}
+
+
+void app_main()
+{
+	xTaskCreate(lora_task, "lora_task", 10000, NULL, 1, NULL);
+}
+
