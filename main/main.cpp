@@ -11,6 +11,10 @@
 #include "esp_timer.h"
 #include "esp_mac.h"
 #include "xtensa/core-macros.h"
+#include <math.h>
+#include <stddef.h>
+
+
 
 #include "LoRa.h" // Asegúrate de que esta librería LoRa sea compatible con ESP32
 
@@ -33,6 +37,24 @@ int _counter = 0; // Contador de mensajes enviados
 bool is_host = true;
 bool continue_sending = false; // Variable para controlar si el Host puede seguir enviando mensajes
 
+// Constantes para medir distancias2
+#define DISTANCE_BUFFER_SIZE 5 // Numero de valores TOF para promediar por medicion
+#define MEASURE_BUFFER_SIZE 3 // Número de mediciones promediadas
+
+// Buffers para almacenar los valores de TOF (Tiempo de Vuelo)
+double tof_buffer[DISTANCE_BUFFER_SIZE]; 
+size_t tof_buffer_idx = 0; // Indice actual para tof_buffer
+
+// Estructura para almacenar el resultado del promedio y desviación estándar
+typedef struct {
+    double average;
+    double std_deviation;
+} AvgStdDevResult;
+
+// Buffer para almacenar los resultados de las mediciones
+AvgStdDevResult measurements_buffer[MEASURE_BUFFER_SIZE];
+size_t measurements_buffer_idx = 0; // Índice actual para measurements_buffer
+
 // Tiempo máximo de espera en microsegundos para recibir un mensaje antes de intentar enviar
 #define LORA_RECEIVE_TIMEOUT_US 3000000 // 3 segundos
 
@@ -42,7 +64,47 @@ uint64_t host_send_delay = 0;
 uint64_t receptor_send_delay = 0;
 
 
-// --- Funciones Auxiliares ---
+// Funciones Auxiliares
+
+// Función para calcular el promedio y la desviación estándar de un array de datos
+AvgStdDevResult calculate_avg_stddev(const double data[], size_t size) {
+    AvgStdDevResult result;
+    result.average = 0.0;
+    result.std_deviation = 0.0;
+
+    if (size == 0) {
+        return result; // Si el tamaño es 0, retornar resultado vacío
+    }
+
+    double sum = 0.0;
+    for (size_t i = 0; i < size; i++) {
+        sum += data[i];
+    }
+    result.average = sum / size; // Calcular el promedio
+
+    double sq_sum = 0.0;
+    for (size_t i = 0; i < size; i++) {
+        sq_sum += (data[i] - result.average) * (data[i] - result.average);
+    }
+    // Calcular la desviación estándar
+    result.std_deviation = sqrt(sq_sum / size); 
+
+    return result;
+}
+
+// Función de comparación para ordenar los resultados por desviación estándar
+int compare_avg_stddev_results(const void *a, const void *b) {
+    const AvgStdDevResult *result_a = (const AvgStdDevResult *)a;
+    const AvgStdDevResult *result_b = (const AvgStdDevResult *)b;
+
+    if (result_a->std_deviation < result_b->std_deviation) {
+        return -1; // a comes before b
+    } else if (result_a->std_deviation > result_b->std_deviation) {
+        return 1;  // b comes before a
+    } else {
+        return 0;  // they are equal
+    }
+}
 
 // Función para generar un ID único basado en la MAC del ESP32 y determinar el rol
 void generate_unique_id() {
@@ -106,15 +168,15 @@ uint64_t send_message_and_get_delay(LoRa* lora, uint64_t timestamp_payload) {
 }
 
 // Función para manejar el mensaje recibido
-void handle_message(uint64_t *ts_en_paquete, uint64_t *ts_recepcion_local=nullptr) {
+int handle_message(LoRa* lora, uint64_t *ts_en_paquete, uint64_t *ts_recepcion_local=nullptr) {
     char msg_content[100] = {0};
     
-    int packetSize = lora.handleDataReceived(msg_content, ts_en_paquete);
-    lora.setDataReceived(false);
+    int packetSize = lora->handleDataReceived(msg_content, ts_en_paquete);
+    lora->setDataReceived(false);
     
     if (packetSize == 0) { // handleDataReceived devuelve 0 si hay error o paquete corrupto
         printf("Paquete inválido o error de CRC.\n");
-        continue;
+        return 0;
     }
     
     printf("\n<-- [RX] Mensaje Recibido: '%s'\n", msg_content);
@@ -122,10 +184,12 @@ void handle_message(uint64_t *ts_en_paquete, uint64_t *ts_recepcion_local=nullpt
     if (ts_recepcion_local != nullptr) {
         printf("    Timestamp Recepción Local (RX_DONE): %llu ns\n", *ts_recepcion_local);
     }
-    printf("    RSSI: %d dBm, SNR: %d dB\n", lora.getPacketRssi(), lora.getPacketSnr());
+    printf("    RSSI: %d dBm, SNR: %d dB\n", lora->getPacketRssi(), lora->getPacketSnr());
+    
+    return 1;
 }
 
-// --- Función Principal ---
+// Función Principal
 
 extern "C" void app_main();
 extern "C" void lora_task( void *);
@@ -155,13 +219,15 @@ void lora_task( void* param )
         {
             if (lora.getDataReceived())
             {
-                uint64_t timestamp_recepcion_local = get_nanotime(); // Timestamp al recibir la interrupción
+                uint64_t ts_recepcion_local = get_nanotime(); // Timestamp al recibir la interrupción
                 uint64_t ts_en_paquete = 0; // El timestamp que viene en el paquete
 
                 // Manejar el mensaje recibido
-                handle_message(&ts_en_paquete, &timestamp_recepcion_local);
-                
-                // --- Lógica de Roles y Cálculo de Latencia/RTT ---
+                // Si handle_message devuelve 0, significa error o paquete corrupto
+                if (handle_message(&lora, &ts_en_paquete, &ts_recepcion_local) == 0) {
+                    continue;
+                }                
+                // Lógica y cálculo de Latencia/RTT
 
                 if (is_host) {
                     // HOST recibe un mensaje y espera el segundo mensaje
@@ -172,38 +238,91 @@ void lora_task( void* param )
                         {
                             uint64_t receptor_send_delay = 0; // Timestamp que viene en el paquete
 
-                            // Manejar el mensaje recibido 
-                            handle_message(&receptor_send_delay);
-
+                            // Manejar el mensaje recibido
+                            // Si handle_message devuelve 0, significa error o paquete corrupto
+                            if (handle_message(&lora, &receptor_send_delay) == 0) {
+                                break;
+                            } 
                             // HOST recibe un mensaje, calcula el RTT y la distancia
-                            uint64_t rtt = timestamp_recepcion_local - ts_en_paquete - host_send_delay - receptor_send_delay;
+                            uint64_t rtt = ts_recepcion_local - ts_en_paquete - host_send_delay - receptor_send_delay;
                             double hardware_delay = 0; // Retardo estimado en nanosegundos
-                            double tof = (rtt - hardware_delay) / (2.0 * 1000000000.0); // Tiempo de vuelo en segundos
-                            double distance_m = tof * 299792458.0;
+                            double tof = (rtt - hardware_delay) / 2.0; // Tiempo de vuelo en nanosegundos
                             printf("==================================================\n");
                             printf("  HOST: ¡Respuesta Recibida! RTT: %llu ns (%.3f ms)\n", rtt, (float)rtt / 1000000.0);
                             printf("==================================================\n");
-                            printf("  HOST: Distancia estimada: %f m\n", distance_m);
+                            printf("  HOST: TOF: %f ns\n", tof); // Mostrar el TOF calculado
                             printf("==================================================\n");
 
-                            continue_sending = true; // Indica que el HOST puede continuar enviando mensajes
-                            message_received = true;
-                            break; // Salir del bucle de espera, ya se recibió y procesó un mensaje
+                            // Lo que sigue es para calcular el promedio y la desviación estándar de las mediciones de TOF
+                            // y elegir la distancia con menor desviación estándar.
 
+                            // Asegurarse de que el TOF sea positivo y que el buffer no esté lleno
+                            if (tof > 0 && tof_buffer_idx < DISTANCE_BUFFER_SIZE) { 
+                                // Añadir el valor de TOF al buffer
+                                tof_buffer[tof_buffer_idx++] = tof;
+
+                                // Cuando el buffer de TOF esté lleno, calcular el promedio y la desviación estándar
+                                if (tof_buffer_idx == DISTANCE_BUFFER_SIZE) {
+                                    printf("\n#########################\n");
+                                    printf("Calculando promedio y desviación estándar para %zu valores de TOF...\n", tof_buffer_idx);
+                                    
+                                    // Añadir el resultado (promedio TOF, desviación estándar TOF) al buffer de mediciones
+                                    if (measurements_buffer_idx < MEASURE_BUFFER_SIZE) {
+                                        measurements_buffer[measurements_buffer_idx++] = calculate_avg_stddev(tof_buffer, DISTANCE_BUFFER_SIZE);
+                                    } else {
+                                        // Esto es una situación de advertencia si el buffer de mediciones está lleno.
+                                        // Podrías implementar una estrategia de reemplazo si es necesario.
+                                        printf("ADVERTENCIA: measurements_buffer está lleno, descartando nuevo promedio/desviación estándar.\n");
+                                    }
+                                    
+                                    // Reiniciar el índice del buffer de TOF para la próxima serie de mediciones
+                                    tof_buffer_idx = 0; 
+                                    printf("#########################\n\n");
+                                }
+                            }
+
+                            // Cuando el buffer de mediciones promediadas esté lleno, seleccionar la mejor distancia
+                            if (measurements_buffer_idx == MEASURE_BUFFER_SIZE) {
+                                printf("\nObteniendo la mejor distancia de %zu mediciones de TOF promediadas...\n", measurements_buffer_idx);
+                                // Ordenar el arreglo de estructuras por la desviación estándar del TOF (usando qsort)
+                                qsort(measurements_buffer, MEASURE_BUFFER_SIZE, sizeof(AvgStdDevResult), compare_avg_stddev_results);
+                                
+                                printf("Buffer de Mediciones (Promedio TOF, Desv. Est. TOF):\n");
+                                for (size_t i = 0; i < MEASURE_BUFFER_SIZE; i++) {
+                                    printf("    {Prom: %.9f ns, Desv. Est.: %.9f ns}\n", measurements_buffer[i].average, measurements_buffer[i].std_deviation);
+                                }
+                                printf("\n");
+
+                                // El mejor promedio de TOF es el que tiene la menor desviación estándar
+                                double best_avg_tof = measurements_buffer[0].average;
+                                // Convertir este promedio de TOF a distancia
+                                double best_distance_m = (best_avg_tof / 1000000000.0) * 299792458.0; // Velocidad de la luz en m/s
+
+                                printf("Mejor Distancia Estimada (Menor Desv. Est. de TOF): %.3f m (Promedio TOF: %.9f ns, Desv. Est. TOF: %.9f ns)\n", 
+                                       best_distance_m, measurements_buffer[0].average, measurements_buffer[0].std_deviation);
+                                
+                                // Limpiar el índice del buffer de mediciones para la próxima serie de promedios
+                                measurements_buffer_idx = 0; 
+                                printf("\n");
+                            }
+
+                                continue_sending = true; // Indica que el HOST puede continuar enviando mensajes
+                                message_received = true;
+                                break; // Salir del bucle de espera, ya se recibió y procesó un mensaje
+                            }
                         }
-                    }
-
-                } else { 
+                        
+                    } else { 
                     // RECEPTOR recibe un mensaje del HOST, lo procesa y responde.
                     uint64_t timestamp_antes_envio_receptor = get_nanotime(); // Timestamp antes de enviar la respuesta
 
                     // Calcular el tiempo que el RECEPTOR tardó en procesar el mensaje
-                    uint64_t processing_delay_receptor = timestamp_antes_envio_receptor - timestamp_recepcion_local;
+                    uint64_t processing_delay_receptor = timestamp_antes_envio_receptor - ts_recepcion_local;
                     printf("  RECEPTOR: Retardo de Procesamiento: %llu ns\n", processing_delay_receptor);
 
                     // El timestamp para enviar de vuelta al HOST es:
                     // el timestamp original del HOST (recibido en el paquete) + el tiempo de procesamiento del RECEPTOR
-                    uint64_t timestamp_para_host = timestamp_en_paquete_recibido + processing_delay_receptor;
+                    uint64_t timestamp_para_host = ts_en_paquete + processing_delay_receptor;
                     printf("  RECEPTOR: Enviando respuesta con TS ajustado: %llu ns\n", timestamp_para_host);
 
                     receptor_send_delay = send_message_and_get_delay(&lora, timestamp_para_host); // Envía el mensaje con el timestamp ajustado

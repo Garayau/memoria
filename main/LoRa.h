@@ -72,7 +72,7 @@ class LoRa
 	int parsePacket(int size);
 	int read();
 	void receive(int size);
-	int handleDataReceived( char *msg, int64_t *timestamp );
+	int handleDataReceived( char *msg, uint64_t *timestamp );
 	int available();
 
 	int beginPacket(int implicitHeader);

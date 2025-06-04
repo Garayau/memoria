@@ -387,7 +387,7 @@ int LoRa::getPacketSnr() {
     return (int8_t)readRegister(0x19) / 4;
 }
 
-int LoRa::handleDataReceived( char *msg, int64_t *timestamp_rx )
+int LoRa::handleDataReceived( char *msg, uint64_t *timestamp_rx )
 {
     int irqFlags = readRegister(REG_IRQ_FLAGS);
     writeRegister(REG_IRQ_FLAGS, irqFlags);
