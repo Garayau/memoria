@@ -101,7 +101,7 @@ def init_lora():
     print("LoRa module initialized.")
 
 def send_lora_message():
-    timestamp = int(time.time_ns())
+    timestamp = time.time_ns()
 
     message = f"{unique_id}: Hello from Raspberry Pi!"
     packet = struct.pack(">Q", timestamp) + message.encode('utf-8')
@@ -143,10 +143,14 @@ def calculate_distance(receive_timestamp, received_timestamp, send_time_diff):
     Calculate the distance based on the time of flight
     and the speed of light (3e8 m/s)
     """
-    HARDWARE_DELAY = 0#98522.0 # 
-    rtt_ns = abs(((receive_timestamp - received_timestamp) - send_time_diff) - HARDWARE_DELAY)
+    HARDWARE_DELAY = 0
+    rtt_ns = receive_timestamp - (received_timestamp + send_time_diff + HARDWARE_DELAY)
     tof_s = rtt_ns / (2 * 1_000_000_000) # ns -> s, divide by 2 for one-way
-    distance_m = tof_s * 299_792_458 #/ 1_000 # m -> km
+    distance_m = tof_s * 299_792_458 # Speed of light in m/s
+    # Open text file for logging
+    with open("log.txt", "a") as log_file:
+        log_file.write(f"\nRTT: {rtt_ns} ns")
+    print(f"\nRTT: {rtt_ns} ns")
     print(f"Time of flight: {tof_s:.6f} seconds")
     print(f"Distance: {distance_m:.3f} meters")
 
@@ -154,7 +158,6 @@ def calculate_distance(receive_timestamp, received_timestamp, send_time_diff):
 
 def receive_lora_message(send_time_diff):
     spi_write(REG_OP_MODE, MODE_RX_CONTINUOUS) # Set to RX mode
-
     start_time = time.time()
     while (spi_read(REG_IRQ_FLAGS) & IRQ_RX_DONE_MASK) == 0:
         if time.time() - start_time > 2:
@@ -165,15 +168,15 @@ def receive_lora_message(send_time_diff):
     receive_timestamp = time.time_ns()
     spi_write(REG_IRQ_FLAGS, IRQ_RX_DONE_MASK) # Clear RX done flag
 
-    packet_length = spi_read(REG_RX_NB_BYTES)
+    packet_length = spi_read(REG_RX_NB_BYTES) # Get length of received packet
 
-    packet = []
+    packet = [] # Buffer for received packet
     spi_write(REG_FIFO_ADDR_PTR, 0x00) # Set FIFO pointer to base
     for _ in range(packet_length):
-        packet.append(spi_read(REG_FIFO))
+        packet.append(spi_read(REG_FIFO)) # Read data from FIFO
 
     packet_bytes = bytes(packet)
-    print(f"Received packet: {packet_bytes}")
+    print(f"\nReceived packet: {packet_bytes}")
     print(f"Received length: {len(packet_bytes)}")
 
     try:
@@ -186,7 +189,7 @@ def receive_lora_message(send_time_diff):
     except ValueError:
         return
 
-    print(f"\nReceived message: {message}")
+    print(f"Received message: {message}")
     print(f"Received timestamp (from sender): {received_timestamp}")
     print(f"Reception timestamp: {receive_timestamp}")
 
@@ -201,13 +204,15 @@ def main():
     distances_buffer = [] # Buffer for distances
     measurements_buffer = [] # Buffer for average and standard deviations
     while True:
-        t1 = time.time_ns()
+        t1 = time.monotonic_ns()
         send_lora_message()
-        t2 = time.time_ns()
+        t2 = time.monotonic_ns()
         send_time_diff = t2 - t1
 
         # Receive the message and calculate distance
         distance_m = receive_lora_message(send_time_diff)
+        print("send_time_diff:", send_time_diff)
+
         if distance_m:
             # Append distance to the buffer
             distances_buffer.append(distance_m)
