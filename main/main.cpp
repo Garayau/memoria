@@ -38,7 +38,7 @@ bool continue_sending = false; // Variable para controlar si el Host puede segui
 
 // Constantes para medir distancias2
 #define DISTANCE_BUFFER_SIZE 15 // Numero de valores TOF para promediar por medicion
-#define MEASURE_BUFFER_SIZE 5 // Número de mediciones promediadas
+#define MEASURE_BUFFER_SIZE 3 // Número de mediciones promediadas
 #define NUM_CALIBRATION_SAMPLES 5 // Número de las primeras muestras para estimar el hardware_delay base
 #define OUTLIER_STD_DEV_FACTOR 3.0 // Factor de desviación estándar para detección de outliers (3.0 es común)
 #define MIN_ACCEPTABLE_RTT_NS 100.0 // Umbral mínimo razonable para RTT (100ns), para descartar valores extremadamente bajos/corruptos
@@ -143,19 +143,19 @@ uint64_t get_nanotime() {
 // Función para enviar un mensaje LoRa
 void writeMessage( LoRa* lora, uint64_t timestamp_payload )
 {
-	char msg_content[100]; // Contenido del mensaje de texto
-	sprintf( msg_content, "%s: Mensaje No. [%d]", unique_id, _counter++);
+    char msg_content[100]; // Contenido del mensaje de texto
+    sprintf( msg_content, "%s: Mensaje No. [%d]", unique_id, _counter++);
 
-	lora->beginPacket(false);
+    lora->beginPacket(false);
 
     // 1. Enviar el timestamp binario (8 bytes) al inicio del payload
     lora->write((uint8_t*)&timestamp_payload, sizeof(uint64_t));
 
     // 2. Enviar el contenido del mensaje de texto
-	lora->write( (uint8_t*) msg_content, (size_t) strlen(msg_content) );
-	lora->endPacket(false);
+    lora->write( (uint8_t*) msg_content, (size_t) strlen(msg_content) );
+    lora->endPacket(false);
 
-    // printf("--> [TX] Enviando TS: %llu, Contenido: '%s'\n", timestamp_payload, msg_content);
+    printf("--> [TX] Enviando TS: %llu, Contenido: '%s'\n", timestamp_payload, msg_content);
 }
 
 // Función de retardo
@@ -181,7 +181,7 @@ int handle_message(LoRa* lora, uint64_t *ts_en_paquete, uint64_t *ts_recepcion_l
     lora->setDataReceived(false);
     
     if (packetSize == 0) { // handleDataReceived devuelve 0 si hay error o paquete corrupto
-        // printf("Paquete inválido o error de CRC.\n");
+        printf("Paquete inválido o error de CRC.\n");
         return 0;
     }
     
@@ -202,22 +202,22 @@ extern "C" void lora_task( void *);
 
 void lora_task( void* param )
 {
-	LoRa lora( PIN_NUM_MOSI, PIN_NUM_MISO, PIN_NUM_CLK, PIN_NUM_CS, RESET_PIN, PIN_NUM_DIO, 17 );
+    LoRa lora( PIN_NUM_MOSI, PIN_NUM_MISO, PIN_NUM_CLK, PIN_NUM_CS, RESET_PIN, PIN_NUM_DIO, 17 );
 
     generate_unique_id(); // Generar ID y determinar rol HOST/RECEPTOR
 
     if (is_host) {
         delay(1000); // Espera un segundo antes de enviar el siguiente mensaje
-        // printf("Soy el HOST. Iniciando comunicación...\n");
+        printf("Soy el HOST. Iniciando comunicación...\n");
         host_send_delay = send_message_and_get_delay(&lora, get_nanotime()); // Envía el primer mensaje con su propio timestamp
-        // printf("(HOST) Time it takes to send (first message): %llu ns\n", host_send_delay);
+        printf("(HOST) Time it takes to send (first message): %llu ns\n", host_send_delay);
         // delay(10); // Pequeña pausa para que el receptor tenga tiempo de ponerse en modo RX
     }
 
-	for ( ;; ) // Bucle infinito
-	{
+    for ( ;; ) // Bucle infinito
+    {
         lora.receive(0); // Pone LoRa en modo de recepción
-        // printf("Esperando mensajes... (Timeout: %d segundos)\n", LORA_RECEIVE_TIMEOUT_US / 1000000);
+        printf("Esperando mensajes... (Timeout: %d segundos)\n", LORA_RECEIVE_TIMEOUT_US / 1000000);
         
         bool message_received = false;
         uint64_t receive_start_time = esp_timer_get_time(); // Tiempo de inicio de la espera RX
@@ -233,7 +233,7 @@ void lora_task( void* param )
                 // Si handle_message devuelve 0, significa error o paquete corrupto
                 if (handle_message(&lora, &ts_en_paquete, &ts_recepcion_local) == 0) {
                     continue;
-                }                
+                }
                 // Lógica y cálculo de Latencia/RTT
 
                 if (is_host) {
@@ -250,7 +250,6 @@ void lora_task( void* param )
                             if (handle_message(&lora, &receptor_send_delay) == 0) {
                                 break;
                             }
-
                             // HOST recibe un mensaje, calcula el RTT y la distancia
                             uint64_t rtt = ts_recepcion_local - ts_en_paquete - host_send_delay - receptor_send_delay;
                             if (rtt < MIN_ACCEPTABLE_RTT_NS || rtt > MAX_ACCEPTABLE_RTT_NS) {
@@ -258,13 +257,9 @@ void lora_task( void* param )
                                 break; 
                             }
 
-                            // double hardware_delay = 0; // Retardo estimado en nanosegundos
-                            // double tof = (rtt - hardware_delay) / 2.0; // Tiempo de vuelo en nanosegundos
-                            // printf("==================================================\n");
+                            printf("==================================================\n");
                             printf("  HOST: ¡Respuesta Recibida! RTT: %llu ns (%.3f ms)\n", rtt, (float)rtt / 1000000.0);
-                            // printf("==================================================\n");
-                            // printf("  HOST: TOF: %f ns\n", tof); // Mostrar el TOF calculado
-                            // printf("==================================================\n");
+                            printf("==================================================\n");
 
                             // Calibración dinámica de base_rtt_offset_ns
                             if (!initial_calibration_done && tof_buffer_idx < NUM_CALIBRATION_SAMPLES) {
@@ -281,38 +276,9 @@ void lora_task( void* param )
                                 break; 
                             }
 
-
-                            // Lo que sigue es para calcular el promedio y la desviación estándar de las mediciones de TOF
-                            // y elegir la distancia con menor desviación estándar.
-
-                            // // Asegurarse de que el TOF sea positivo y que el buffer no esté lleno
-                            // if (tof > 0 && tof_buffer_idx < DISTANCE_BUFFER_SIZE) { 
-                            //     // Añadir el valor de TOF al buffer
-                            //     tof_buffer[tof_buffer_idx++] = tof;
-
-                            //     // Cuando el buffer de TOF esté lleno, calcular el promedio y la desviación estándar
-                            //     if (tof_buffer_idx == DISTANCE_BUFFER_SIZE) {
-                            //         printf("\n#########################\n");
-                            //         printf("Calculando promedio y desviación estándar para %zu valores de TOF...\n", tof_buffer_idx);
-                                    
-                            //         // Añadir el resultado (promedio TOF, desviación estándar TOF) al buffer de mediciones
-                            //         if (measurements_buffer_idx < MEASURE_BUFFER_SIZE) {
-                            //             measurements_buffer[measurements_buffer_idx++] = calculate_avg_stddev(tof_buffer, DISTANCE_BUFFER_SIZE);
-                            //         } else {
-                            //             // Esto es una situación de advertencia si el buffer de mediciones está lleno.
-                            //             // Podrías implementar una estrategia de reemplazo si es necesario.
-                            //             printf("ADVERTENCIA: measurements_buffer está lleno, descartando nuevo promedio/desviación estándar.\n");
-                            //         }
-                                    
-                            //         // Reiniciar el índice del buffer de TOF para la próxima serie de mediciones
-                            //         tof_buffer_idx = 0; 
-                            //         printf("#########################\n\n");
-                            //     }
-                            // }
-
                              // Si la calibración inicial está hecha, procedemos con el cálculo de TOF
                             if (initial_calibration_done) {
-                                double tof = (double)rtt - base_rtt_offset_ns; // Se resta el offset (ANTES era `double hardware_delay = 0;` y `(rtt - hardware_delay) / 2.0;`)
+                                double tof = (double)rtt - base_rtt_offset_ns; // Se resta el offset
                                 
                                 // Asegurarse de que el TOF sea positivo y que el buffer no esté lleno
                                 if (tof > 0 && tof_buffer_idx < DISTANCE_BUFFER_SIZE) { 
@@ -323,7 +289,7 @@ void lora_task( void* param )
                                         printf("\n#########################\n");
                                         printf("Calculando promedio y desviación estándar para %zu valores de TOF...\n", tof_buffer_idx);
                                         
-                                        // --- FILTRADO DE OUTLIERS POR DESVIACIÓN ESTÁNDAR (NUEVO) ---
+                                        // Filtrado de outliers por desviación estándar
                                         double filtered_tof_buffer[DISTANCE_BUFFER_SIZE];
                                         size_t filtered_count = 0;
                                         AvgStdDevResult current_avg_stddev = calculate_avg_stddev(tof_buffer, tof_buffer_idx);
@@ -390,15 +356,15 @@ void lora_task( void* param )
 
                     // Calcular el tiempo que el RECEPTOR tardó en procesar el mensaje
                     uint64_t processing_delay_receptor = timestamp_antes_envio_receptor - ts_recepcion_local;
-                    // printf("  RECEPTOR: Retardo de Procesamiento: %llu ns\n", processing_delay_receptor);
+                    printf("  RECEPTOR: Retardo de Procesamiento: %llu ns\n", processing_delay_receptor);
 
                     // El timestamp para enviar de vuelta al HOST es:
                     // el timestamp original del HOST (recibido en el paquete) + el tiempo de procesamiento del RECEPTOR
                     uint64_t timestamp_para_host = ts_en_paquete + processing_delay_receptor;
-                    // printf("  RECEPTOR: Enviando respuesta con TS ajustado: %llu ns\n", timestamp_para_host);
+                    printf("  RECEPTOR: Enviando respuesta con TS ajustado: %llu ns\n", timestamp_para_host);
 
                     receptor_send_delay = send_message_and_get_delay(&lora, timestamp_para_host); // Envía el mensaje con el timestamp ajustado
-                    // printf("(RECEPTOR) Time it takes to send: %llu ns\n", receptor_send_delay);
+                    printf("(RECEPTOR) Time it takes to send: %llu ns\n", receptor_send_delay);
 
                     delay(10); // Pequeña pausa
 
@@ -414,7 +380,7 @@ void lora_task( void* param )
             delay(1000); // Espera un segundo antes de enviar el siguiente mensaje
             // Si el HOST puede seguir enviando mensajes, envía un nuevo mensaje
             host_send_delay = send_message_and_get_delay(&lora, get_nanotime()); // Envía un nuevo mensaje con su propio timestamp
-            // printf("(HOST) Time it takes to send (continue): %llu ns\n", host_send_delay);
+            printf("(HOST) Time it takes to send (continue): %llu ns\n", host_send_delay);
             continue_sending = false; // Reinicia la variable para el próximo ciclo
             // delay(10); // Pequeña pausa para no saturar el bus SPI
             continue;
@@ -424,23 +390,23 @@ void lora_task( void* param )
         if (!message_received) {
             if (is_host) {
                 // El HOST no recibe un mensaje, envía un nuevo mensaje para reiniciar la cadena.
-                // printf("HOST: Timeout de recepción. Enviando un nuevo mensaje para reiniciar la cadena...\n");
+                printf("HOST: Timeout de recepción. Enviando un nuevo mensaje para reiniciar la cadena...\n");
                 host_send_delay = send_message_and_get_delay(&lora, get_nanotime()); // Envía un nuevo mensaje con su propio timestamp
-                // printf("(HOST) Time it takes to send (restart): %llu ns\n", host_send_delay);
+                printf("(HOST) Time it takes to send (restart): %llu ns\n", host_send_delay);
                 // delay(10);
                 continue;
             } else {
                 // El RECEPTOR no debe iniciar la comunicación a menos que reciba un mensaje.
                 // Si hay timeout, simplemente vuelve a esperar.
-                // printf("RECEPTOR: Timeout de recepción. Volviendo a esperar...\n");
+                printf("RECEPTOR: Timeout de recepción. Volviendo a esperar...\n");
                 continue;
             }
         }
-	}
+    }
 }
 
 // Función principal de la aplicación
 extern "C" void app_main()
 {
-	xTaskCreate(lora_task, "lora_task", 10000, NULL, 1, NULL);
+    xTaskCreate(lora_task, "lora_task", 10000, NULL, 1, NULL);
 }
