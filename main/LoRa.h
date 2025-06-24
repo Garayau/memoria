@@ -74,7 +74,6 @@ public:
     void receive(int size);
     int handleDataReceived( char *msg, uint64_t *timestamp );
     int available();
-    // bool isInitializedCorrectly(); // Eliminada
 
     int beginPacket(int implicitHeader);
     size_t write(const uint8_t *buffer, size_t size);
@@ -91,7 +90,7 @@ public:
     void setSyncWord(int sw);
 
     void sleep();
-    void idle();
+    bool idle(); // Ahora devuelve bool para indicar éxito/fallo
 
     void setFrequency(long frequency);
     void setSpreadingFactor(int sf);
@@ -100,7 +99,7 @@ public:
     void initializeSPI( int mosi, int miso, int clk, int cs );
     void initializeReset( int reset );
     void initializeDIO( int dio );
-    void initialize( int power ); // Ahora solo inicializa SPI y GPIO, y una primera configuración (inestable)
+    void initialize( int power ); // Ahora solo inicializa SPI y GPIO, y un chequeo básico
 
     void setDataReceived( bool r ) { _dataReceived = r; }
     bool getDataReceived() { return _dataReceived; }
@@ -111,12 +110,11 @@ public:
     void resetRegisters(); // Responsable de la configuración robusta LoRa
 
 protected:
-    void writeRegister( uint8_t reg, uint8_t data );
+    bool writeRegister( uint8_t reg, uint8_t data ); // Ahora devuelve bool para indicar éxito de escritura/lectura
     uint8_t readRegister( uint8_t reg );
 
 private:
     void delay( int delay ); // Función para FreeRTOS delay
-    // bool _initialized_correctly = false; // Eliminada
     spi_device_handle_t _spi;
     int _packetIndex = 0;
     int _implicitHeaderMode = 0;

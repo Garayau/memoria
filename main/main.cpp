@@ -57,7 +57,7 @@ extern "C" void app_main(void)
 
     printf("MAIN: Iniciando proceso de configuración LoRa robusta...\n");
     int config_attempts = 0;
-    const int MAX_CONFIG_ATTEMPTS = 5; // Intentos máximos para configuración inicial
+    const int MAX_CONFIG_ATTEMPTS = 10; // Aumentar intentos para mayor robustez
     bool config_ok = false;
 
     while (config_attempts < MAX_CONFIG_ATTEMPTS && !config_ok) {
@@ -80,7 +80,7 @@ extern "C" void app_main(void)
             printf("MAIN: Configuración LoRa exitosa después de %d intentos.\n", config_attempts + 1);
         } else {
             printf("MAIN: Configuración LoRa fallida. Reintentando...\n");
-            vTaskDelay(pdMS_TO_TICKS(500)); // Pequeño retraso antes del siguiente intento
+            vTaskDelay(pdMS_TO_TICKS(100)); // Pequeño retraso antes del siguiente intento
         }
         config_attempts++;
     }
@@ -97,7 +97,7 @@ extern "C" void app_main(void)
     printf("This is ESP32 chip with %" PRIu32 " CPU cores, WiFi%s%s, ",
            (uint32_t)chip_info.cores,
            (chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "",
-           (chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : ""); // Corrected typo here
+           (chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : "");
 
     printf("silicon revision %" PRIu32 ", ", (uint32_t)chip_info.revision);
     

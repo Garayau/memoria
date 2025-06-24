@@ -20,7 +20,6 @@ LoRa::LoRa( int mosi, int miso, int clk, int cs, int reset, int dio, int power )
     initializeSPI( mosi, miso, clk, cs );
     initializeReset( reset );
     initializeDIO( dio );
-    // initialize(power); // Eliminado: initialize() se llamará desde main.cpp
 }
 
 long LoRa::getFrequencyValue()
@@ -36,7 +35,10 @@ uint8_t LoRa::getRegisterValue(uint8_t reg)
 // Función para reconfigurar el módulo LoRa de forma robusta
 void LoRa::resetRegisters() {
     printf("DEBUG: LoRa::resetRegisters() - Reconfigurando LoRa...\n");
-    idle(); // Poner en modo standby para poder cambiar registros
+    if (!idle()) { // Asegurarse de estar en IDLE
+        ESP_LOGE(TAG, "FALLO: No se pudo poner el módulo en modo IDLE para resetear registros.");
+        return;
+    }
     delay(200); // Retardo después del idle para estabilidad
 
     // Realiza TODAS las configuraciones aquí
@@ -72,7 +74,7 @@ void LoRa::initializeSPI( int mosi, int miso, int clk, int cs )
 
     devcfg.address_bits = 8; // Modo de 8 bits para la dirección del registro
     devcfg.mode = 0; // SPI Mode 0
-    devcfg.clock_speed_hz = 10 * 1000 * 1000; // 10 MHz
+    devcfg.clock_speed_hz = 1 * 1000 * 1000; // REDUCIDO A 1 MHz PARA ESTABILIDAD
     devcfg.spics_io_num = cs; // Pin CS
     devcfg.flags = 0;
     devcfg.queue_size = 1;
@@ -160,7 +162,9 @@ void LoRa::initialize( int power )
     writeRegister(REG_MODEM_CONFIG_3, 0x04);
 
     // put in standby mode
-    idle();
+    if (!idle()) { // Intentar poner en idle y verificar
+        ESP_LOGE(TAG, "FALLO: No se pudo poner el módulo en modo IDLE durante initialize().");
+    }
     delay(500); // Retardo después del idle inicial en initialize()
     
     printf("LoRa Config Check (End of Initialize - Preliminary):\n");
@@ -177,38 +181,72 @@ void LoRa::initialize( int power )
 
 void LoRa::sleep()
 {
+    printf("DEBUG SLEEP: Intentando poner en modo SLEEP (0x00).\n");
     writeRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_SLEEP);
+    esp_rom_delay_us(500); // Give time to settle
+    uint8_t current_mode = readRegister(REG_OP_MODE);
+    printf("DEBUG SLEEP: Leído REG_OP_MODE después de sleep: 0x%02x.\n", current_mode);
+    if (current_mode != (MODE_LONG_RANGE_MODE | MODE_SLEEP)) {
+        ESP_LOGW(TAG, "ADVERTENCIA: Módulo no entró en SLEEP correctamente. Modo actual: 0x%02x.", current_mode);
+    }
 }
 
-void LoRa::idle()
+// idle() ahora verifica el modo de operación de forma más granular
+bool LoRa::idle()
 {
-    writeRegister(REG_OP_MODE, MODE_LONG_RANGE_MODE | MODE_STDBY);
+    int attempts = 0;
+    const int MAX_IDLE_ATTEMPTS = 5;
+    uint8_t expected_mode = MODE_LONG_RANGE_MODE | MODE_STDBY;
+
+    printf("DEBUG IDLE: Intentando poner en modo STDBY (0x%02x).\n", expected_mode);
+
+    while (attempts < MAX_IDLE_ATTEMPTS) {
+        printf("DEBUG IDLE: Intento %d/%d. Escribiendo REG_OP_MODE con 0x%02x.\n", attempts + 1, MAX_IDLE_ATTEMPTS, expected_mode);
+        // Direct write, but still using the robust writeRegister
+        bool write_successful = writeRegister(REG_OP_MODE, expected_mode);
+        
+        esp_rom_delay_us(1000); // Retardo AUMENTADO a 1 ms para que el registro se asiente
+
+        uint8_t current_op_mode = readRegister(REG_OP_MODE);
+        printf("DEBUG IDLE: Leído REG_OP_MODE: 0x%02x.\n", current_op_mode);
+
+        if (current_op_mode == expected_mode) {
+            printf("DEBUG IDLE: Éxito! Módulo en modo STDBY.\n");
+            return true; // Éxito: el módulo está en STDBY
+        } else {
+            ESP_LOGW(TAG, "ADVERTENCIA: Fallo al poner en IDLE. Modo actual: 0x%02x (Esperado: 0x%02x). Intento %d/%d.", current_op_mode, expected_mode, attempts + 1, MAX_IDLE_ATTEMPTS);
+            delay(200); // Un poco más de delay antes de reintentar
+            attempts++;
+        }
+    }
+    ESP_LOGE(TAG, "ERROR: No se pudo poner el módulo LoRa en modo IDLE después de %d intentos.", MAX_IDLE_ATTEMPTS);
+    return false; // Fallo
 }
 
 void LoRa::setFrequency(long frequency)
 {
-    idle(); // Asegura que el módulo esté en STDBY antes de configurar
+    if (!idle()) return; // Asegura que el módulo esté en STDBY antes de configurar
     printf("DEBUG Freq: Current OP_MODE before setting freq: 0x%02x\n", readRegister(REG_OP_MODE));
     _frequency = frequency; // CRÍTICO: Guarda la frecuencia en el miembro de la clase
 
     uint64_t frf = ((uint64_t)frequency << 19) / 32000000;
     printf("DEBUG Freq: Input Freq=%ld, FRF_Val=0x%llx\n", frequency, frf);
 
-    writeRegister(REG_FRF_MSB, (uint8_t)(frf >> 16));
+    if (!writeRegister(REG_FRF_MSB, (uint8_t)(frf >> 16))) ESP_LOGE(TAG, "Fallo al escribir FRF_MSB");
     esp_rom_delay_us(200); // Retardo de 200 microsegundos
     printf("DEBUG Freq: Wrote FRF_MSB=0x%02x, ReadBack=0x%02x\n", (uint8_t)(frf >> 16), readRegister(REG_FRF_MSB));
 
-    writeRegister(REG_FRF_MID, (uint8_t)(frf >> 8));
+    if (!writeRegister(REG_FRF_MID, (uint8_t)(frf >> 8))) ESP_LOGE(TAG, "Fallo al escribir FRF_MID");
     esp_rom_delay_us(200); // Retardo de 200 microsegundos
     printf("DEBUG Freq: Wrote FRF_MID=0x%02x, ReadBack=0x%02x\n", (uint8_t)(frf >> 8), readRegister(REG_FRF_MID));
 
-    writeRegister(REG_FRF_LSB, (uint8_t)(frf >> 0));
+    if (!writeRegister(REG_FRF_LSB, (uint8_t)(frf >> 0))) ESP_LOGE(TAG, "Fallo al escribir FRF_LSB");
     esp_rom_delay_us(200); // Retardo de 200 microsegundos
     printf("DEBUG Freq: Wrote FRF_LSB=0x%02x, ReadBack=0x%02x\n", (uint8_t)(frf >> 0), readRegister(REG_FRF_LSB));
 }
 
 void LoRa::setSignalBandwidth(long bw) {
-    idle(); // Asegura que esté en STDBY antes de configurar
+    if (!idle()) return; // Asegura que esté en STDBY antes de configurar
     printf("DEBUG BW: OP_MODE before write REG_MODEM_CONFIG_1: 0x%02x\n", readRegister(REG_OP_MODE));
     uint8_t bwCode = 0;
 
@@ -238,13 +276,13 @@ void LoRa::setSignalBandwidth(long bw) {
     modemConfig1 &= 0x0F; // Limpia los bits del BW (bits 7-4) manteniendo los 4 bits bajos
     modemConfig1 |= (bwCode << 4); // Establece el nuevo BW
 
-    writeRegister(REG_MODEM_CONFIG_1, modemConfig1);
+    if (!writeRegister(REG_MODEM_CONFIG_1, modemConfig1)) ESP_LOGE(TAG, "Fallo al escribir MODEM_CONFIG_1 (BW)");
     esp_rom_delay_us(200);
     printf("DEBUG BW Set: Input SBW=%ld, BW_Code=%d, Wrote REG_MODEM_CONFIG_1=0x%02x, ReadBack=0x%02x (OP_MODE after write: 0x%02x)\n", bw, bwCode, modemConfig1, readRegister(REG_MODEM_CONFIG_1), readRegister(REG_OP_MODE));
 }
 
 void LoRa::setSpreadingFactor(int sf) {
-    idle(); // Asegura que esté en STDBY antes de configurar
+    if (!idle()) return; // Asegura que esté en STDBY antes de configurar
     printf("DEBUG SF: OP_MODE before write REG_MODEM_CONFIG_2: 0x%02x\n", readRegister(REG_OP_MODE));
     if (sf < 6) {
         sf = 6;
@@ -260,7 +298,7 @@ void LoRa::setSpreadingFactor(int sf) {
     uint8_t newSF_val = (sf << 4);
     modemConfig2 = newSF_val | lower_bits;
 
-    writeRegister(REG_MODEM_CONFIG_2, modemConfig2);
+    if (!writeRegister(REG_MODEM_CONFIG_2, modemConfig2)) ESP_LOGE(TAG, "Fallo al escribir MODEM_CONFIG_2 (SF)");
     esp_rom_delay_us(200);
     printf("DEBUG SF Set: Input SF=%d, Wrote REG_MODEM_CONFIG_2=0x%02x, ReadBack=0x%02x (OP_MODE after write: 0x%02x)\n", sf, modemConfig2, readRegister(REG_MODEM_CONFIG_2), readRegister(REG_OP_MODE));
 }
@@ -268,19 +306,22 @@ void LoRa::setSpreadingFactor(int sf) {
 
 void LoRa::setSyncWord(int sw)
 {
-    writeRegister(REG_SYNC_WORD, sw);
+    if (!writeRegister(REG_SYNC_WORD, sw)) ESP_LOGE(TAG, "Fallo al escribir SYNC_WORD");
 }
 
 void LoRa::setCRC( bool crc )
 {
-    idle(); // Asegura que esté en STDBY antes de configurar
+    if (!idle()) return; // Asegura que esté en STDBY antes de configurar
     printf("DEBUG CRC: OP_MODE before write REG_MODEM_CONFIG_2: 0x%02x\n", readRegister(REG_OP_MODE));
+    uint8_t current_modem_config_2 = readRegister(REG_MODEM_CONFIG_2);
     if ( crc )
-        writeRegister(REG_MODEM_CONFIG_2, readRegister(REG_MODEM_CONFIG_2) | 0x04);
+        current_modem_config_2 |= 0x04;
     else
-        writeRegister(REG_MODEM_CONFIG_2, readRegister(REG_MODEM_CONFIG_2) & 0xfb);
+        current_modem_config_2 &= 0xfb;
+
+    if (!writeRegister(REG_MODEM_CONFIG_2, current_modem_config_2)) ESP_LOGE(TAG, "Fallo al escribir MODEM_CONFIG_2 (CRC)");
     esp_rom_delay_us(200); // Retardo después de la escritura del CRC
-    printf("DEBUG CRC Set: New REG_MODEM_CONFIG_2=0x%02x, ReadBack=0x%02x (OP_MODE after write: 0x%02x)\n", readRegister(REG_MODEM_CONFIG_2), readRegister(REG_MODEM_CONFIG_2), readRegister(REG_OP_MODE));
+    printf("DEBUG CRC Set: New REG_MODEM_CONFIG_2=0x%02x, ReadBack=0x%02x (OP_MODE after write: 0x%02x)\n", current_modem_config_2, readRegister(REG_MODEM_CONFIG_2), readRegister(REG_OP_MODE));
 }
 
 void LoRa::setOCP(uint8_t mA)
@@ -290,12 +331,12 @@ void LoRa::setOCP(uint8_t mA)
     if (mA <= 120) ocpTrim = (mA - 45) / 5;
     else if (mA <=240) ocpTrim = (mA + 30) / 10;
 
-    writeRegister(REG_LR_OCP, 0x20 | (0x1F & ocpTrim));
+    if (!writeRegister(REG_LR_OCP, 0x20 | (0x1F & ocpTrim))) ESP_LOGE(TAG, "Fallo al escribir LR_OCP");
 }
 
 void LoRa::setTxPower(int8_t level, int8_t outputPin)
 {
-    idle(); // Asegura que esté en STDBY antes de configurar
+    if (!idle()) return; // Asegura que esté en STDBY antes de configurar
     printf("DEBUG Power: Current OP_MODE before setting power: 0x%02x\n", readRegister(REG_OP_MODE));
     _power = level; 
 
@@ -305,7 +346,7 @@ void LoRa::setTxPower(int8_t level, int8_t outputPin)
         if (level < 0) level = 0;
         else if (level > 14) level = 14;
 
-        writeRegister(REG_PA_CONFIG, 0x70 | level);
+        if (!writeRegister(REG_PA_CONFIG, 0x70 | level)) ESP_LOGE(TAG, "Fallo al escribir PA_CONFIG (RFO)");
     }
     else // Using PA_BOOST pin
     {
@@ -316,13 +357,13 @@ void LoRa::setTxPower(int8_t level, int8_t outputPin)
             if (level > 20) level = 20; // Max 20dBm
 
             level -= 3; // Subtract 3 for 20dBm boost (Semtech errata)
-            writeRegister(REG_PA_DAC, 0x87); // Enable high power PA_DAC for +20dBm
+            if (!writeRegister(REG_PA_DAC, 0x87)) ESP_LOGE(TAG, "Fallo al escribir PA_DAC (High Power)"); // Enable high power PA_DAC for +20dBm
             setOCP(140); // Set OCP for higher current
         }
         else
         {
             if (level < 2) level = 2; // Min 2dBm
-            writeRegister(REG_PA_DAC, 0x84); // Disable high power PA_DAC
+            if (!writeRegister(REG_PA_DAC, 0x84)) ESP_LOGE(TAG, "Fallo al escribir PA_DAC (Normal Power)"); // Disable high power PA_DAC
             setOCP(100); // Set OCP for lower current
         }
         int paConfig = PA_BOOST | (level - 2); // Calculate PA_CONFIG value
@@ -330,7 +371,7 @@ void LoRa::setTxPower(int8_t level, int8_t outputPin)
         printf( "RegPAConfig: [%02x]\n", paConfig);
         printf( "RegPADAC: [%02x]\n", readRegister(REG_PA_DAC)); // Read back PADAC for verification
 
-        writeRegister(REG_PA_CONFIG, paConfig );
+        if (!writeRegister(REG_PA_CONFIG, paConfig )) ESP_LOGE(TAG, "Fallo al escribir PA_CONFIG (BOOST)");
     }
 
     esp_rom_delay_us(200); // Retardo después de la escritura crítica de PA_CONFIG
@@ -354,15 +395,15 @@ void LoRa::implicitHeaderMode()
 
 int LoRa::beginPacket(int implicitHeader)
 {
-  idle(); // put in standby mode
+  if (!idle()) return 0; // put in standby mode
   if (implicitHeader) {
     implicitHeaderMode();
   } else {
     explicitHeaderMode();
   }
   // reset FIFO address and payload length
-  writeRegister(REG_FIFO_ADDR_PTR, 0);
-  writeRegister(REG_PAYLOAD_LENGTH, 0);
+  if (!writeRegister(REG_FIFO_ADDR_PTR, 0)) return 0;
+  if (!writeRegister(REG_PAYLOAD_LENGTH, 0)) return 0;
 
   return 1;
 }
@@ -393,11 +434,11 @@ size_t LoRa::write(const uint8_t *buffer, size_t size)
 
   // write data
   for (size_t i = 0; i < size; i++) {
-    writeRegister(REG_FIFO, buffer[i]);
+    if (!writeRegister(REG_FIFO, buffer[i])) return 0; // Salir si falla la escritura FIFO
   }
 
   // update length
-  writeRegister(REG_PAYLOAD_LENGTH, currentLength + size);
+  if (!writeRegister(REG_PAYLOAD_LENGTH, currentLength + size)) return 0;
 
   return size;
 }
@@ -420,7 +461,7 @@ int LoRa::read()
 void LoRa::receive(int size)
 {
     // Asegurarse de que el módulo esté en IDLE antes de cambiar a RX
-    idle(); 
+    if (!idle()) return; 
 
     if (size > 0)
     {
@@ -500,15 +541,6 @@ int LoRa::parsePacket(int size)
 {
     int packetLength = 0;
 
-    // parsePacket no debería cambiar el modo. receive() es el que lo hace.
-    // if (size > 0)
-    // {
-    //     implicitHeaderMode();
-    //     writeRegister(REG_PAYLOAD_LENGTH, size & 0xff);
-    // }
-    // else
-    //     explicitHeaderMode();
-
     int irqFlags = readRegister(REG_IRQ_FLAGS);
     writeRegister(REG_IRQ_FLAGS, irqFlags); // clear IRQ's
 
@@ -542,25 +574,70 @@ void LoRa::delay( int msec )
     vTaskDelay( msec / portTICK_PERIOD_MS);
 }
 
-// ** FUNCIÓN writeRegister **
-void LoRa::writeRegister( uint8_t reg, uint8_t data )
+// ** FUNCIÓN writeRegister con reintentos para registros críticos **
+bool LoRa::writeRegister( uint8_t reg, uint8_t data )
 {
     reg = reg | 0x80; // MSB alto para escritura
+    const int MAX_WRITE_RETRIES = 3;
 
-    spi_transaction_t transaction;
-    memset( &transaction, 0, sizeof(spi_transaction_t) );
+    for (int i = 0; i < MAX_WRITE_RETRIES; ++i) {
+        spi_transaction_t transaction;
+        memset( &transaction, 0, sizeof(spi_transaction_t) );
 
-    transaction.length = 8; // Longitud en bits de los datos a transmitir (1 byte)
-    transaction.rxlength = 0; // No se esperan datos de vuelta para una escritura
-    transaction.addr = reg; // La dirección del registro y el bit de escritura
-    transaction.flags = SPI_TRANS_USE_TXDATA; // Usar el campo tx_data para datos cortos
+        transaction.length = 8; 
+        transaction.rxlength = 0; 
+        transaction.addr = reg;
+        transaction.flags = SPI_TRANS_USE_TXDATA;
+        memcpy(transaction.tx_data, &data, 1);
 
-    memcpy(transaction.tx_data, &data, 1); // Copiar 1 byte de datos en el buffer tx_data
+        esp_err_t err = spi_device_polling_transmit(_spi, &transaction);
 
-    esp_err_t err = spi_device_polling_transmit(_spi, &transaction);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Error escribiendo registro SPI 0x%02x con 0x%02x: %s (Intento %d/%d)", reg & 0x7f, data, esp_err_to_name(err), i + 1, MAX_WRITE_RETRIES);
+            delay(10); // Corto delay antes de reintentar
+            continue;
+        }
 
-    if (err != ESP_OK)
-        ESP_LOGE(TAG, "Error escribiendo registro SPI 0x%02x con 0x%02x: %s", reg & 0x7f, data, esp_err_to_name(err));
+        // --- MODIFICACIÓN CLAVE AQUÍ: Lógica de verificación ajustada para REG_OP_MODE ---
+        if ((reg & 0x7f) == REG_OP_MODE) {
+            // Solo verificar estrictamente si se está intentando poner en STDBY (0x81) o SLEEP (0x80).
+            // Para TX (0x83) o RX (0x85), el chip transiciona rápidamente o se espera que lo haga,
+            // por lo que una lectura inmediata de vuelta no siempre reflejará el valor escrito momentáneamente.
+            if (data == (MODE_LONG_RANGE_MODE | MODE_STDBY) || data == (MODE_LONG_RANGE_MODE | MODE_SLEEP)) {
+                uint8_t readback_data = readRegister(reg & 0x7f); // Leer sin el bit de escritura
+                if (readback_data == data) {
+                    return true; // Éxito en escritura y verificación
+                } else {
+                    ESP_LOGW(TAG, "ADVERTENCIA: Verificación fallida para reg 0x%02x. Escrito: 0x%02x, Leído: 0x%02x (Intento %d/%d)", reg & 0x7f, data, readback_data, i + 1, MAX_WRITE_RETRIES);
+                    delay(10); // Corto delay antes de reintentar
+                    continue;
+                }
+            } else { 
+                // Para TX o RX, si la escritura SPI fue exitosa, asumimos que el comando fue enviado.
+                // La verificación de que el chip entra en TX/RX y luego vuelve a IDLE se maneja en el bucle principal.
+                return true;
+            }
+        }
+        // --- FIN MODIFICACIÓN CLAVE ---
+
+        // Para otros registros críticos, mantener la verificación estricta.
+        if ((reg & 0x7f) == REG_FRF_MSB || (reg & 0x7f) == REG_FRF_MID || (reg & 0x7f) == REG_FRF_LSB ||
+            (reg & 0x7f) == REG_MODEM_CONFIG_1 || (reg & 0x7f) == REG_MODEM_CONFIG_2 ||
+            (reg & 0x7f) == REG_PA_CONFIG || (reg & 0x7f) == REG_PA_DAC || (reg & 0x7f) == REG_LR_OCP) {
+            
+            uint8_t readback_data = readRegister(reg & 0x7f); // Leer sin el bit de escritura
+            if (readback_data == data) {
+                return true; // Éxito en escritura y verificación
+            } else {
+                ESP_LOGW(TAG, "ADVERTENCIA: Verificación fallida para reg 0x%02x. Escrito: 0x%02x, Leído: 0x%02x (Intento %d/%d)", reg & 0x7f, data, readback_data, i + 1, MAX_WRITE_RETRIES);
+                delay(10); // Corto delay antes de reintentar
+                continue;
+            }
+        }
+        return true; // Éxito para otros registros que no son críticos de verificación de readback inmediata
+    }
+    ESP_LOGE(TAG, "ERROR: Fallo persistente al escribir y verificar registro 0x%02x después de %d intentos.", reg & 0x7f, MAX_WRITE_RETRIES);
+    return false; // Fallo total
 }
 
 // ** FUNCIÓN readRegister **
@@ -572,20 +649,16 @@ uint8_t LoRa::readRegister( uint8_t reg )
     spi_transaction_t transaction;
     memset( &transaction, 0, sizeof(spi_transaction_t) );
 
-    // IMPORTANTE: Para la lectura, 'length' es el número de bits a transmitir
-    // durante la fase de datos. Necesitamos enviar 8 bits dummy para leer 8 bits.
     transaction.length = 8; // Generar 8 pulsos de reloj para la fase de datos (para RX)
     transaction.rxlength = 8; // Esperar recibir 8 bits de datos
 
     // La dirección del registro LoRa para lectura (el MSB debe ser 0)
     transaction.addr = reg & 0x7f;
 
-    // Usar tx_buffer y rx_buffer para enviar datos dummy y recibir datos reales
     transaction.tx_buffer = tx_dummy_buffer; // Enviar byte dummy (todos ceros)
     transaction.rx_buffer = &result;         // Recibir los datos reales en 'result'
 
-    // No es necesario SPI_TRANS_USE_TXDATA o SPI_TRANS_USE_RXDATA cuando se usan tx_buffer/rx_buffer
-    transaction.flags = 0; // Limpiar cualquier bandera existente para usar buffers directamente
+    transaction.flags = 0; 
 
     esp_err_t err = spi_device_polling_transmit( _spi, &transaction);
 
