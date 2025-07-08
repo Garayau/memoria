@@ -202,7 +202,7 @@ extern "C" void lora_task( void *);
 
 void lora_task( void* param )
 {
-    LoRa lora( PIN_NUM_MOSI, PIN_NUM_MISO, PIN_NUM_CLK, PIN_NUM_CS, RESET_PIN, PIN_NUM_DIO, 17 );
+    LoRa lora( PIN_NUM_MOSI, PIN_NUM_MISO, PIN_NUM_CLK, PIN_NUM_CS, RESET_PIN, PIN_NUM_DIO, 14 );
 
     generate_unique_id(); // Generar ID y determinar rol HOST/RECEPTOR
 
