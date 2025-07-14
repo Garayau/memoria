@@ -7,15 +7,23 @@
 #include <esp_log.h>
 #include "driver/spi_master.h"
 #include "driver/gpio.h"
-#include "rom/gpio.h"
 #include "esp_timer.h"
 #include "esp_mac.h"
 #include "xtensa/core-macros.h"
 #include <math.h>
 #include <stddef.h>
 #include <float.h>
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_intr_alloc.h"
 
 #include "LoRa.h" // Asegúrate de que esta librería LoRa sea compatible con ESP32
+
+
+// Define ESP_INTR_FLAG_DEFAULT if not already defined, as a fallback.
+#ifndef ESP_INTR_FLAG_DEFAULT
+#define ESP_INTR_FLAG_DEFAULT 0
+#endif
 
 #define PIN_NUM_CLK  	18
 #define PIN_NUM_MISO 	19
@@ -30,16 +38,17 @@
 
 char unique_id[UNIQUE_ID_MAX_LEN];  // Variable global para almacenar el ID único
 int _counter = 0; // Contador de mensajes enviados
+int rssi_counter = 0; // Contador de mensajes RSSI
 
 // Define si este ESP32 es el "Host" (el que inicia la comunicación)
 // Esto se determinará por el último byte de la MAC.
 bool is_host = true;
 bool continue_sending = false; // Variable para controlar si el Host puede seguir enviando mensajes
 
-// Constantes para medir distancias2
+// Constantes para medir distancias
 #define DISTANCE_BUFFER_SIZE 15 // Numero de valores TOF para promediar por medicion
 #define MEASURE_BUFFER_SIZE 3 // Número de mediciones promediadas
-#define NUM_CALIBRATION_SAMPLES 5 // Número de las primeras muestras para estimar el hardware_delay base
+#define NUM_CALIBRATION_SAMPLES 15 // Número de las primeras muestras para estimar el hardware_delay base
 #define OUTLIER_STD_DEV_FACTOR 3.0 // Factor de desviación estándar para detección de outliers (3.0 es común)
 #define MIN_ACCEPTABLE_RTT_NS 100.0 // Umbral mínimo razonable para RTT (100ns), para descartar valores extremadamente bajos/corruptos
 #define MAX_ACCEPTABLE_RTT_NS 5000000.0 // Umbral máximo razonable para RTT (5ms), para descartar valores extremadamente altos/corruptos
@@ -70,7 +79,12 @@ uint64_t receptor_send_delay = 0;
 double base_rtt_offset_ns = 0.0;
 bool initial_calibration_done = false;
 
+// --- Archivos CSV globales ---
+FILE *rtt_archivo = NULL;
+FILE *tof_archivo = NULL;
+
 // Funciones Auxiliares
+
 
 // Función para calcular el promedio y la desviación estándar de un array de datos
 AvgStdDevResult calculate_avg_stddev(const double data[], size_t size) {
@@ -120,7 +134,7 @@ void generate_unique_id() {
     snprintf(unique_id, sizeof(unique_id), "ESP32-%02X%02X%02X", mac[3], mac[4], mac[5]);
     ESP_LOGI("UID", "ESP32 Unique ID: %s", unique_id);
 
-    if (mac[5] == 0x94) { // Si el último byte de la MAC es 0x94, este ESP32 es el Host
+    if (mac[5] == 0xCC || mac[5] == 0x94) { // Si el último byte de la MAC es 0x94, este ESP32 es el Host
         is_host = true;
     } else {
         is_host = false;
@@ -188,7 +202,7 @@ int handle_message(LoRa* lora, uint64_t *ts_en_paquete, uint64_t *ts_recepcion_l
     // printf("\n<-- [RX] Mensaje Recibido: '%s'\n", msg_content);
     // printf("    Timestamp en Paquete: %llu ns\n", *ts_en_paquete);
     if (ts_recepcion_local != nullptr) {
-        // printf("    Timestamp Recepción Local (RX_DONE): %llu ns\n", *ts_recepcion_local);
+        printf("    Timestamp Recepción Local (RX_DONE): %llu ns\n", *ts_recepcion_local);
     }
     // printf("    RSSI: %d dBm, SNR: %d dB\n", lora->getPacketRssi(), lora->getPacketSnr());
     
@@ -206,10 +220,16 @@ void lora_task( void* param )
 
     generate_unique_id(); // Generar ID y determinar rol HOST/RECEPTOR
 
+    // Imprimir configuración LoRa inicial después de la inicialización
+
+    // printf("RTT_HEADER:[RTT] (para offset), [RTT] (para tof)\n");
+    // printf("TOF_HEADER:offset_ns, [tof_buffer], [prom, std_dev] (iniciales), [prom, std_dev] (despues de filtrado), distancia\n");
+
     if (is_host) {
         delay(1000); // Espera un segundo antes de enviar el siguiente mensaje
         printf("Soy el HOST. Iniciando comunicación...\n");
         host_send_delay = send_message_and_get_delay(&lora, get_nanotime()); // Envía el primer mensaje con su propio timestamp
+
         printf("(HOST) Time it takes to send (first message): %llu ns\n", host_send_delay);
         // delay(10); // Pequeña pausa para que el receptor tenga tiempo de ponerse en modo RX
     }
@@ -234,6 +254,22 @@ void lora_task( void* param )
                 if (handle_message(&lora, &ts_en_paquete, &ts_recepcion_local) == 0) {
                     continue;
                 }
+
+                // // Imprimir rssi y snr del paquete recibido para serial_logger.py
+                // if (rssi_counter == 0) {
+                //     // Imprimir el encabezado RSSI_DATA solo una vez
+                //     printf("RSSI_DATA:[\n");
+                // }
+                // if (rssi_counter < 15) {
+                //     printf("RSSI_DATA:(%d dBm, %d dB),\n", lora.getPacketRssi(), lora.getPacketSnr());
+                //     rssi_counter++;
+                // } else {
+                //     // Después de las primeras 10 veces, imprimir una sola vez
+                //     printf("RSSI_DATA:],\n");
+                //     printf("rssi_15\n");
+                //     rssi_counter = 0; // Reiniciar el contador de RSSI
+                // }
+
                 // Lógica y cálculo de Latencia/RTT
 
                 if (is_host) {
@@ -250,6 +286,7 @@ void lora_task( void* param )
                             if (handle_message(&lora, &receptor_send_delay) == 0) {
                                 break;
                             }
+
                             // HOST recibe un mensaje, calcula el RTT y la distancia
                             uint64_t rtt = ts_recepcion_local - ts_en_paquete - host_send_delay - receptor_send_delay;
                             if (rtt < MIN_ACCEPTABLE_RTT_NS || rtt > MAX_ACCEPTABLE_RTT_NS) {
@@ -260,10 +297,19 @@ void lora_task( void* param )
                             printf("==================================================\n");
                             printf("  HOST: ¡Respuesta Recibida! RTT: %llu ns (%.3f ms)\n", rtt, (float)rtt / 1000000.0);
                             printf("==================================================\n");
-
+                            
                             // Calibración dinámica de base_rtt_offset_ns
                             if (!initial_calibration_done && tof_buffer_idx < NUM_CALIBRATION_SAMPLES) {
+                                if (tof_buffer_idx == 0) {
+                                    // printf("RTT_DATA:[%llu,\n", rtt); // Guardar RTT en el archivo CSV
+                                }
+                                else {
+                                    // printf("RTT_DATA:%llu,\n", rtt); // Guardar RTT en el archivo CSV
+                                }
+                                
                                 tof_buffer[tof_buffer_idx++] = (double)rtt; // Guardamos el RTT completo para calibración
+                                
+                                
                                 if (tof_buffer_idx == NUM_CALIBRATION_SAMPLES) {
                                     AvgStdDevResult calibration_result = calculate_avg_stddev(tof_buffer, NUM_CALIBRATION_SAMPLES);
                                     base_rtt_offset_ns = calibration_result.average;
@@ -272,20 +318,31 @@ void lora_task( void* param )
                                     printf("\n--- CALIBRACIÓN INICIAL COMPLETA ---\n");
                                     printf("Base RTT Offset (Hardware Delay) Calibrado: %.3f ns (%.3f ms)\n", base_rtt_offset_ns, base_rtt_offset_ns / 1000000.0);
                                     printf("-----------------------------------\n\n");
+
+                                    // printf("RTT_DATA:], [\n"); // Guardar RTT en el archivo CSV
+                                    // printf("TOF_RAW:%.3f, [\n", base_rtt_offset_ns);
+
                                 }
                                 break; 
                             }
 
                              // Si la calibración inicial está hecha, procedemos con el cálculo de TOF
                             if (initial_calibration_done) {
-                                double tof = (double)rtt - base_rtt_offset_ns; // Se resta el offset
+
+                                // printf("RTT_DATA:%llu, \n", rtt); // Guardar RTT en el archivo CSV
+                                
+                                double tof = ((double)rtt - base_rtt_offset_ns) / 2; // Se resta el offset
                                 
                                 // Asegurarse de que el TOF sea positivo y que el buffer no esté lleno
                                 if (tof > 0 && tof_buffer_idx < DISTANCE_BUFFER_SIZE) { 
                                     tof_buffer[tof_buffer_idx++] = tof;
+                                    // printf("TOF_RAW:%.3f,\n", tof); // Guardar TOF en el archivo CSV
 
                                     // Cuando el buffer de TOF esté lleno
                                     if (tof_buffer_idx == DISTANCE_BUFFER_SIZE) {
+                                        // printf("RTT_DATA:],[\n"); // Termino de RTTs
+                                        // printf("TOF_RAW:],\n"); // Termino tofs
+
                                         printf("\n#########################\n");
                                         printf("Calculando promedio y desviación estándar para %zu valores de TOF...\n", tof_buffer_idx);
                                         
@@ -293,6 +350,7 @@ void lora_task( void* param )
                                         double filtered_tof_buffer[DISTANCE_BUFFER_SIZE];
                                         size_t filtered_count = 0;
                                         AvgStdDevResult current_avg_stddev = calculate_avg_stddev(tof_buffer, tof_buffer_idx);
+                                        // printf("TOF_RAW:[%.9f, %.9f],\n", current_avg_stddev.average, current_avg_stddev.std_deviation); // Guardar promedio y desviación estándar en el archivo CSV
 
                                         for (size_t i = 0; i < tof_buffer_idx; i++) {
                                             if (fabs(tof_buffer[i] - current_avg_stddev.average) <= OUTLIER_STD_DEV_FACTOR * current_avg_stddev.std_deviation) {
@@ -304,6 +362,8 @@ void lora_task( void* param )
 
                                         // Recalcular promedio y desviación estándar con los valores filtrados
                                         AvgStdDevResult final_tof_result = calculate_avg_stddev(filtered_tof_buffer, filtered_count);
+                                        // printf("TOF_RAW:[%.9f, %.9f],[\n", final_tof_result.average, final_tof_result.std_deviation); // Guardar promedio y desviación estándar en el archivo CSV
+
                                         
                                         // Añadir el resultado al buffer de mediciones (código existente)
                                         if (measurements_buffer_idx < MEASURE_BUFFER_SIZE) {
@@ -334,7 +394,7 @@ void lora_task( void* param )
                                 double best_avg_tof = measurements_buffer[0].average;
                                 // Convertir este promedio de TOF a distancia
                                 // double best_distance_m = (best_avg_tof / 1000000000.0) * 299792458.0; // Velocidad de la luz en m/s
-                                double best_distance_m = (best_avg_tof / 1000000000.0) * 299792458.0 / 2.0; 
+                                double best_distance_m = (best_avg_tof / 1000000000.0) * 299792458.0; 
 
                                 printf("Mejor distancia estimada (Menor Desv. Est. de TOF): %.3f m (Promedio TOF: %.9f ns, Desv. Est. TOF: %.9f ns)\n", 
                                        best_distance_m, measurements_buffer[0].average, measurements_buffer[0].std_deviation);
@@ -342,6 +402,12 @@ void lora_task( void* param )
                                 // Limpiar el índice del buffer de mediciones para la próxima serie de promedios
                                 measurements_buffer_idx = 0; 
                                 printf("\n");
+
+                                initial_calibration_done = false; // Reiniciar la calibración para el próximo ciclo
+                                tof_buffer_idx = 0; // Reiniciar el índice del buffer de TOF
+                                
+                                printf("#\nRTT_DATA:]\n"); // Termino de ciclo
+                                // printf("TOF_RAW:%.3f\n#\n", best_distance_m); // Termino de ciclo
                             }
 
                                 continue_sending = true; // Indica que el HOST puede continuar enviando mensajes
@@ -366,6 +432,8 @@ void lora_task( void* param )
                     receptor_send_delay = send_message_and_get_delay(&lora, timestamp_para_host); // Envía el mensaje con el timestamp ajustado
                     printf("(RECEPTOR) Time it takes to send: %llu ns\n", receptor_send_delay);
 
+
+
                     delay(10); // Pequeña pausa
 
                     send_message_and_get_delay(&lora, receptor_send_delay);
@@ -380,6 +448,7 @@ void lora_task( void* param )
             delay(1000); // Espera un segundo antes de enviar el siguiente mensaje
             // Si el HOST puede seguir enviando mensajes, envía un nuevo mensaje
             host_send_delay = send_message_and_get_delay(&lora, get_nanotime()); // Envía un nuevo mensaje con su propio timestamp
+
             printf("(HOST) Time it takes to send (continue): %llu ns\n", host_send_delay);
             continue_sending = false; // Reinicia la variable para el próximo ciclo
             // delay(10); // Pequeña pausa para no saturar el bus SPI
@@ -405,8 +474,9 @@ void lora_task( void* param )
     }
 }
 
+
 // Función principal de la aplicación
 extern "C" void app_main()
 {
-    xTaskCreate(lora_task, "lora_task", 10000, NULL, 1, NULL);
+    xTaskCreate(lora_task, "lora_task", 10000, NULL, 10, NULL);
 }
